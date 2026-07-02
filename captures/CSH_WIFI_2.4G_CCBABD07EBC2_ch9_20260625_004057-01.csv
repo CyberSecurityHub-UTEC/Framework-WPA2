@@ -1,0 +1,7 @@
+
+BSSID, First time seen, Last time seen, channel, Speed, Privacy, Cipher, Authentication, Power, # beacons, # IV, LAN IP, ID-length, ESSID, Key
+CC:BA:BD:07:EB:C2, 2026-06-25 00:41:00, 2026-06-25 00:41:12,  9, 360, WPA3 WPA2, CCMP, SAE PSK, -19,      107,      499,   0.  0.  0.  0,  13, CSH_WIFI_2.4G, 
+
+Station MAC, First time seen, Last time seen, Power, # packets, BSSID, Probed ESSIDs
+3A:8F:91:79:8A:18, 2026-06-25 00:41:00, 2026-06-25 00:41:12, -14,      874, CC:BA:BD:07:EB:C2,
+

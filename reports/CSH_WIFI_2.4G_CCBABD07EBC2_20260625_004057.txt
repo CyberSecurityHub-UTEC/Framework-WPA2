@@ -1,0 +1,13 @@
+WPA Toolkit Report
+==================
+Fecha: Thu Jun 25 12:41:12 AM -05 2026
+SSID: CSH_WIFI_2.4G
+BSSID: CC:BA:BD:07:EB:C2
+Canal: 9
+Frecuencia: 2452 MHz
+Privacy: WPA3 WPA2
+Cipher: CCMP
+Auth: SAE PSK
+CAP: captures/CSH_WIFI_2.4G_CCBABD07EBC2_ch9_20260625_004057-01.cap
+Filtered CAP: captures/CSH_WIFI_2.4G_CCBABD07EBC2_ch9_20260625_004057_TARGET_ONLY.cap
+Handshake: No capturado
