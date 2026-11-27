@@ -837,7 +837,7 @@ class InterfaceScreen(Screen):
         ))
         root = "root" if be.is_root() else "sin root (modo demo)"
         self.query_one("#pickhint", Static).update(Text.from_markup(
-            f"[{C_DIM}]Elige la interfaz WiFi para la sesión.  "
+            f"[{C_DIM}]Elige la antena externa (USB) para la sesión.  "
             f"Sesión: [/][{C_TEAL}]{root}[/][{C_DIM}].  "
             f"Enter selecciona · r refresca.[/]"
         ))
@@ -848,16 +848,17 @@ class InterfaceScreen(Screen):
         ))
         t = self.query_one("#ifaces", DataTable)
         t.add_columns(" ", "INTERFAZ", "MODO", "MAC", "CANAL")
-        t.border_title = "INTERFACES DETECTADAS"
+        t.border_title = "ANTENAS EXTERNAS (USB)"
         self._load()
         t.focus()
 
     def _load(self) -> None:
         t = self.query_one("#ifaces", DataTable)
         t.clear()
-        ifs = be.list_interfaces()
+        ifs = be.list_interfaces(external_only=True)
         if not ifs:
-            t.add_row("·", Text("No se detectaron interfaces WiFi", style=C_AMBER), "", "", "")
+            t.add_row("·", Text("No se detectó antena externa (USB)", style=C_AMBER), "", "", "")
+            t.add_row("·", Text("Conecta la MT7612U y pulsa r para refrescar", style=C_DIM), "", "", "")
             return
         for i in ifs:
             typ = i["type"]
