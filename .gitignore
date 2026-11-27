@@ -1,0 +1,19 @@
+# Entorno Python / Textual
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.uv/
+uv.lock
+
+# Artefactos nuevos de laboratorio (datos locales, no versionar).
+# Los directorios se recrean solos al arrancar (backend.py / main.sh).
+hashes/*.22000
+/reports/*.txt
+/reports/*.md
+
+# Capturas de ejemplo ya versionadas se conservan; las nuevas quedan locales.
+# Descomenta para ignorar TODAS las capturas/wordlists nuevas:
+# captures/*.cap
+# captures/*.csv
+# wordlists/*.txt

@@ -7,8 +7,19 @@
 
   Scan → Captura de handshake → Deauth dirigido → Verificación → Cracking (aircrack-ng / hashcat)
 
-  `v2.0` · Bash TUI · inspirado en el flujo de [wifite2](https://github.com/derv82/wifite2)
+  `v2.0` · **Consola visual (Textual)** + consola clásica (Bash) · inspirado en [wifite3](https://github.com/derv82/wifit3)
 </div>
+
+---
+
+## 🖥️ Dos interfaces, un mismo flujo
+
+| Interfaz | Comando | Cuándo usarla |
+|---|---|---|
+| **Consola visual (Textual)** — pantalla completa, tabla en vivo con señal/cifrado en color, panel de filtros, log con viñetas y atajos de teclado, estilo wifite3. | `./csh.sh` | Experiencia principal, la más visual. Requiere Python (se instala solo con `uv`). |
+| **Consola clásica (Bash)** — menús de texto, sin dependencias de Python. | `sudo ./main.sh` | Fallback ligero o entornos sin Python. Mismas capacidades base. |
+
+> La consola visual arranca en **modo demo** (carga capturas previas) si la ejecutas sin `sudo`, para que puedas ver la interfaz sin tocar la tarjeta WiFi.
 
 ---
 
@@ -49,7 +60,14 @@ sudo dnf install aircrack-ng iw iproute procps-ng chafa
 ```
 - `aircrack-ng` (airodump-ng, aireplay-ng, aircrack-ng, airmon-ng)
 - `iw`, `ip` — gestión de la interfaz
-- `chafa` — render del logo en terminal
+- `chafa` — render del logo en terminal (consola Bash)
+
+### Para la consola visual (Textual)
+```bash
+sudo dnf install uv          # gestor de entornos Python de Astral
+# (El lanzador ./csh.sh instala Textual automáticamente la primera vez.)
+```
+- Python ≥ 3.10 y [`uv`](https://docs.astral.sh/uv/). Si no hay `uv`, el lanzador usa `python -m venv` + `pip`.
 
 ### Opcionales (desbloquean funciones extra)
 ```bash
@@ -71,18 +89,27 @@ La consola **autodetecta** qué herramientas tienes y lo muestra en el dashboard
 
 ## 🚀 Uso rápido
 
+### Consola visual (recomendada)
+```bash
+# Instala Textual (una sola vez) y arranca; pide sudo para escanear en vivo
+./csh.sh
+./csh.sh -i wlp0s20f0u1mon     # indicando interfaz
+./csh.sh --demo                # solo ver la UI, sin sudo (modo demo)
+```
+**Atajos:** `s` escanear · `Enter` objetivo · `e` cifrado · `c` solo con clientes · `/` buscar SSID · `d` diccionarios · `v` vault · `m` modo monitor · `r` restaurar WiFi · `q` salir.
+
+### Consola clásica (Bash)
 ```bash
 # 1. (Opcional) Activar modo monitor desde fuera de la consola
 sudo ./activate_monitor.sh wlp0s20f0u1
 
-# 2. Lanzar la consola principal
+# 2. Lanzar la consola
 sudo ./main.sh
-#   o indicando la interfaz:
 sudo ./main.sh -i wlp0s20f0u1 --scan-time 15
 
 # 3. Al terminar, devolver la tarjeta a WiFi normal
 sudo ./restore_wifi.sh
-#   (también disponible dentro de la consola: Configuración → Restaurar WiFi)
+#   (también dentro de la consola: Configuración → Restaurar WiFi)
 ```
 
 ### Opciones de línea de comandos
@@ -158,7 +185,13 @@ Si no tienes GPU en esta máquina, la consola te deja el `.22000` listo para cra
 
 ```
 Framework-WPA2/
-├── main.sh              # Consola principal (TUI)
+├── csh.sh               # Lanzador de la consola visual (Textual)
+├── csh_tui/             # App Textual (interfaz visual)
+│   ├── app.py           #   pantallas: scanner, objetivo, vault, diccionarios
+│   ├── backend.py       #   envoltorio aircrack-ng / hashcat / reportes
+│   └── theme.tcss       #   tema visual (estilo wifite3)
+├── pyproject.toml       # Dependencias Python (textual)
+├── main.sh              # Consola clásica (TUI Bash)
 ├── activate_monitor.sh  # Activar modo monitor (standalone)
 ├── restore_wifi.sh      # Restaurar modo managed (standalone)
 ├── CSH_Logo.png         # Logo (render con chafa)
