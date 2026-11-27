@@ -457,6 +457,7 @@ class ScannerScreen(Screen):
         ("e", "cycle_enc", "Cifrado"),
         ("c", "toggle_clients", "Clientes"),
         ("slash", "focus_filter", "Buscar"),
+        ("escape", "defocus_filter", "Salir del filtro"),
         ("d", "dicts", "Diccionarios"),
         ("v", "vault", "Vault"),
         ("m", "monitor", "Monitor"),
@@ -518,6 +519,9 @@ class ScannerScreen(Screen):
                       f"[b]modo demo[/]. Ejecuta con sudo para escanear en vivo.")
         else:
             log.write(f"[{C_TEAL}]▸[/] Pulsa [b]s[/] para escanear · [b]m[/] activa modo monitor.")
+
+        # Foco en la tabla (no en el filtro): así las teclas de comando — incluida q — funcionan.
+        self.query_one("#nets", DataTable).focus()
 
     def _build_cmdbar(self) -> None:
         keys = [("s", "escanear"), ("↵", "objetivo"), ("e", "cifrado"), ("c", "clientes"),
@@ -670,6 +674,16 @@ class ScannerScreen(Screen):
     def _row_hl(self, ev: DataTable.RowHighlighted) -> None:
         self.selected_bssid = ev.row_key.value if ev.row_key else None
 
+    @on(DataTable.RowSelected, "#nets")
+    def _row_selected(self, ev: DataTable.RowSelected) -> None:
+        # Enter sobre la tabla abre el objetivo (DataTable consume la tecla Enter).
+        if ev.row_key:
+            self.selected_bssid = ev.row_key.value
+        self.action_open_target()
+
+    def action_defocus_filter(self) -> None:
+        self.query_one("#nets", DataTable).focus()
+
     def _current_net(self) -> be.Network | None:
         if not self.selected_bssid:
             vis = self._visible()
@@ -750,17 +764,102 @@ class ScannerScreen(Screen):
         self._render_table()
         self._refresh_chrome()
 
+    @on(Input.Submitted, "#ssid")
+    def _ssid_submit(self) -> None:
+        # Enter en el filtro devuelve el foco a la tabla (y así vuelven las teclas de comando).
+        self.query_one("#nets", DataTable).focus()
+
+
+class InterfaceScreen(Screen):
+    """Pantalla inicial: elegir la interfaz WiFi a usar."""
+
+    BINDINGS = [
+        ("enter", "select", "Seleccionar"),
+        ("r", "refresh", "Refrescar"),
+        ("q", "app.quit", "Salir"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="brandband")
+        yield Static(id="pickhint")
+        yield DataTable(id="ifaces", cursor_type="row", zebra_stripes=False)
+        yield Static("", id="cmdbar")
+
+    def on_mount(self) -> None:
+        self.query_one("#brandband", Static).update(Text.from_markup(
+            f"[reverse b {C_TEAL}] CSH [/]  [b {C_INK}]WPA-2 AUDIT CONSOLE[/]  "
+            f"[{C_DIM}]· selección de interfaz ·[/]  [{C_TEAL}]{APP_VER}[/]"
+        ))
+        root = "root" if be.is_root() else "sin root (modo demo)"
+        self.query_one("#pickhint", Static).update(Text.from_markup(
+            f"[{C_DIM}]Elige la interfaz WiFi para la sesión.  "
+            f"Sesión: [/][{C_TEAL}]{root}[/][{C_DIM}].  "
+            f"Enter selecciona · r refresca.[/]"
+        ))
+        self.query_one("#cmdbar", Static).update(Text.from_markup(
+            f"[{C_AMBER} b]↵[/][{C_DIM}] seleccionar[/]   "
+            f"[{C_AMBER} b]r[/][{C_DIM}] refrescar[/]   "
+            f"[{C_AMBER} b]q[/][{C_DIM}] salir[/]"
+        ))
+        t = self.query_one("#ifaces", DataTable)
+        t.add_columns(" ", "INTERFAZ", "MODO", "MAC", "CANAL")
+        t.border_title = "INTERFACES DETECTADAS"
+        self._load()
+        t.focus()
+
+    def _load(self) -> None:
+        t = self.query_one("#ifaces", DataTable)
+        t.clear()
+        ifs = be.list_interfaces()
+        if not ifs:
+            t.add_row("·", Text("No se detectaron interfaces WiFi", style=C_AMBER), "", "", "")
+            return
+        for i in ifs:
+            typ = i["type"]
+            tcolor = C_GREEN if typ == "monitor" else (C_AMBER if typ != "N/A" else C_DIM)
+            t.add_row(
+                Text("◆", style=C_TEAL),
+                Text(i["iface"], style=f"b {C_INK}"),
+                Text(typ, style=tcolor),
+                Text(i["mac"], style="#8a98a0"),
+                Text(str(i["channel"]), style=C_INK),
+                key=i["iface"],
+            )
+
+    def action_refresh(self) -> None:
+        self._load()
+
+    @on(DataTable.RowSelected, "#ifaces")
+    def _row_selected(self, ev: DataTable.RowSelected) -> None:
+        self._choose(ev.row_key.value if ev.row_key else None)
+
+    def action_select(self) -> None:
+        t = self.query_one("#ifaces", DataTable)
+        try:
+            key = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
+        except Exception:
+            key = None
+        self._choose(key)
+
+    def _choose(self, iface: str | None) -> None:
+        if not iface:
+            return
+        self.app.interface = iface  # type: ignore
+        self.app.push_screen(ScannerScreen())
+
 
 class CSHApp(App):
     CSS_PATH = "theme.tcss"
     TITLE = APP_TITLE
+    BINDINGS = [("ctrl+q", "quit", "Salir")]
 
     def __init__(self, interface: str | None = None):
         super().__init__()
         self.interface = interface
 
     def on_mount(self) -> None:
-        if not self.interface:
-            ifs = be.list_interfaces()
-            self.interface = ifs[0]["iface"] if ifs else None
-        self.push_screen(ScannerScreen())
+        # Si se pasó -i, directo al radar; si no, mostrar el selector.
+        if self.interface:
+            self.push_screen(ScannerScreen())
+        else:
+            self.push_screen(InterfaceScreen())

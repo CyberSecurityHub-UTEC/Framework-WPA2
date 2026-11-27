@@ -12,8 +12,8 @@ hashes/*.22000
 /reports/*.txt
 /reports/*.md
 
-# Capturas de ejemplo ya versionadas se conservan; las nuevas quedan locales.
-# Descomenta para ignorar TODAS las capturas/wordlists nuevas:
-# captures/*.cap
-# captures/*.csv
+# Capturas: datos locales, no versionar (se destrackearon las previas).
+captures/
+
+# Descomenta para ignorar tambien las wordlists nuevas:
 # wordlists/*.txt

@@ -118,6 +118,19 @@ DataTable > .datatable--hover { background: #0f2024; }
     padding: 0 1;
 }
 
+/* ── Selector de interfaz (pantalla inicial) ── */
+#pickhint { padding: 1 2 0 2; color: $czdim; height: auto; }
+#ifaces {
+    height: 1fr;
+    margin: 1 2;
+    border: heavy $czteal;
+    border-title-color: $czteal;
+    border-title-style: bold;
+    background: $czbg;
+    scrollbar-background: $czpanel;
+    scrollbar-color: $czteal;
+}
+
 /* ── Modales ── */
 ModalScreen { align: center middle; background: #04060a 75%; }
 #dialog {
