@@ -1,7 +1,0 @@
-
-BSSID, First time seen, Last time seen, channel, Speed, Privacy, Cipher, Authentication, Power, # beacons, # IV, LAN IP, ID-length, ESSID, Key
-E4:83:26:EE:CD:5C, 2026-11-27 09:40:21, 2026-11-27 09:40:31, 10, 130, WPA2, CCMP, PSK, -63,       95,       22,   0.  0.  0.  0,   8, Milandie, 
-
-Station MAC, First time seen, Last time seen, Power, # packets, BSSID, Probed ESSIDs
-A2:DC:36:F3:36:E1, 2026-11-27 09:40:23, 2026-11-27 09:40:31, -29,       89, E4:83:26:EE:CD:5C,
-
