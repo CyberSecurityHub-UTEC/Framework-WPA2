@@ -1,0 +1,169 @@
+/* ───────────────────────────────────────────────────────────────────────────
+   CSH WPA-2 Framework — identidad visual propia
+   "Consola de operaciones": paleta teal + ámbar sobre negro, bordes pesados y
+   angulares (eco del wordmark CSH), rail lateral con tarjetas. Inspirada en el
+   espíritu de wifit3, no en su maqueta.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+$czbg:      #06080a;
+$czpanel:   #0b0f12;
+$czpanel2:  #0e1418;
+$czteal:    #2dd4bf;
+$cztealhi:  #5eead4;
+$czcyan:    #38bdf8;
+$czamber:   #f5a623;
+$czgreen:   #4ade80;
+$czred:     #f43f5e;
+$czviolet:  #c084fc;
+$czdim:     #58646d;
+$czline:    #16242a;
+$czink:     #d6e2e4;
+
+Screen {
+    background: $czbg;
+    color: $czink;
+}
+
+/* ── Banda de marca superior ── */
+#brandband {
+    dock: top;
+    height: 3;
+    background: $czpanel2;
+    border-bottom: heavy $czteal;
+    color: $cztealhi;
+    padding: 0 2;
+    content-align: left middle;
+}
+
+/* ── Cuerpo: rail izquierdo + área principal ── */
+#body { height: 1fr; }
+
+#rail {
+    width: 36;
+    dock: left;
+    background: $czpanel;
+    border-right: heavy $czline;
+    padding: 1 1 0 1;
+}
+#rail .card {
+    border: heavy $czline;
+    border-title-color: $czteal;
+    border-title-style: bold;
+    background: $czpanel2;
+    padding: 0 1;
+    margin-bottom: 1;
+    height: auto;
+}
+#rail .card.accent { border: heavy $czteal; }
+
+#main { padding: 0 1 0 1; }
+
+/* ── Barra de filtros compacta ── */
+#filterbar {
+    height: 3;
+    border: heavy $czline;
+    border-title-color: $czamber;
+    border-title-style: bold;
+    background: $czpanel;
+    padding: 0 1;
+}
+#filterbar Label { color: $czdim; padding: 1 1 0 0; }
+#filterbar Input {
+    border: none;
+    background: $czpanel2;
+    width: 1fr;
+    margin: 0 1;
+}
+
+/* ── Tabla de redes (RADAR) ── */
+#nets {
+    height: 1fr;
+    border: heavy $czline;
+    border-title-color: $czteal;
+    border-title-style: bold;
+    background: $czbg;
+    scrollbar-background: $czpanel;
+    scrollbar-color: $czteal;
+}
+DataTable > .datatable--header {
+    background: $czpanel2;
+    color: $czteal;
+    text-style: bold;
+}
+DataTable > .datatable--cursor {
+    background: #123b3a;
+    color: #ffffff;
+    text-style: bold;
+}
+DataTable > .datatable--hover { background: #0f2024; }
+
+/* ── Log de actividad ── */
+#log {
+    dock: bottom;
+    height: 7;
+    border: heavy $czline;
+    border-title-color: $czamber;
+    border-title-style: bold;
+    background: $czpanel;
+    color: #aab6bb;
+    padding: 0 1;
+}
+
+/* ── Barra de comandos propia (reemplaza al Footer) ── */
+#cmdbar {
+    dock: bottom;
+    height: 1;
+    background: $czpanel2;
+    color: $czdim;
+    padding: 0 1;
+}
+
+/* ── Selector de interfaz (pantalla inicial) ── */
+#pickhint { padding: 1 2 0 2; color: $czdim; height: auto; }
+#ifaces {
+    height: 1fr;
+    margin: 1 2;
+    border: heavy $czteal;
+    border-title-color: $czteal;
+    border-title-style: bold;
+    background: $czbg;
+    scrollbar-background: $czpanel;
+    scrollbar-color: $czteal;
+}
+
+/* ── Modales ── */
+ModalScreen { align: center middle; background: #04060a 75%; }
+#dialog {
+    width: 76;
+    height: auto;
+    max-height: 92%;
+    border: heavy $czteal;
+    border-title-color: $cztealhi;
+    border-title-style: bold;
+    background: $czpanel;
+    padding: 1 2;
+}
+#dialog.hazard { border: heavy $czamber; border-title-color: $czamber; }
+#dialog .heading { color: $cztealhi; text-style: bold; }
+#dialog DataTable {
+    height: auto; max-height: 16; margin: 1 0;
+    border: heavy $czline; background: $czbg;
+}
+
+Button { margin: 1 1 0 0; min-width: 14; border: none; height: 3; }
+Button.-primary { background: $czteal; color: #04120f; text-style: bold; }
+Button.-danger  { background: $czred;  color: #ffffff; text-style: bold; }
+Button:hover    { background: $cztealhi; color: #04120f; }
+
+#actionlog {
+    height: 14;
+    border: heavy $czline;
+    background: $czbg;
+    margin: 1 0;
+    padding: 0 1;
+}
+
+.hint { color: $czdim; }
+.ok   { color: $czgreen; }
+.warn { color: $czamber; }
+.err  { color: $czred; }
