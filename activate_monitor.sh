@@ -227,6 +227,8 @@ echo "    iw dev $MONITOR_INTERFACE info"
 echo ""
 
 echo -e "${BOLD}Restaurar WiFi normal:${RESET}"
+echo "    sudo ./restore_wifi.sh $MONITOR_INTERFACE"
+echo "  (o manualmente:)"
 echo "    sudo ip link set $MONITOR_INTERFACE down"
 echo "    sudo iw dev $MONITOR_INTERFACE set type managed"
 echo "    sudo ip link set $MONITOR_INTERFACE up"

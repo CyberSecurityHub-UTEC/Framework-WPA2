@@ -812,9 +812,10 @@ power_meter() {
 
 # Cuenta clientes asociados a un BSSID en el CSV dado (silencioso si no hay CSV).
 count_clients() {
-    local csv="$1" bssid="$2"
+    local csv="$1" bssid="$2" n
     [[ -n "$csv" && -f "$csv" ]] || { echo 0; return; }
-    parse_clients_for_bssid "$csv" "$bssid" | grep -c . || echo 0
+    n=$(parse_clients_for_bssid "$csv" "$bssid" | grep -c .)
+    echo "${n:-0}"
 }
 
 print_network_table() {
@@ -822,8 +823,8 @@ print_network_table() {
     local csv="${2:-$LAST_SCAN_CSV}"
     local -n arr_ref="$arr_name"
 
-    printf "%b%-4s %-22s %-19s %-4s %-5s %-16s %-3s%b\n" \
-        "$BOLD" "N°" "ESSID" "BSSID" "CH" "ENCR" "SEÑAL" "CL" "$RESET"
+    printf "%b%-4s %-22s %-19s %-4s %-5s %-3s %s%b\n" \
+        "$BOLD" "N°" "ESSID" "BSSID" "CH" "ENCR" "CL" "SEÑAL" "$RESET"
     printf "%b%s%b\n" "$DARK_GREY" "$(repeat_char '─' 78)" "$RESET"
 
     local i=1 item bssid channel power privacy cipher auth beacons ssid enc ecolor clients name
@@ -835,9 +836,10 @@ print_network_table() {
         name="$ssid"
         [[ "$name" == "<hidden>" ]] && name="· oculta ·"
 
-        printf "%-4s %-22.22s %-19s %-4s ${ecolor}%-5s${RESET} %-16s %b%-3s%b\n" \
-            "$i" "$name" "$bssid" "$channel" "$enc" "$(power_meter "$power")" \
-            "$([[ "$clients" -gt 0 ]] && printf "%b" "$CYAN" || printf "%b" "$DIM")" "$clients" "$RESET"
+        printf "%-4s %-22.22s %-19s %-4s ${ecolor}%-5s${RESET} %b%-3s%b %s\n" \
+            "$i" "$name" "$bssid" "$channel" "$enc" \
+            "$([[ "$clients" -gt 0 ]] && printf "%b" "$CYAN" || printf "%b" "$DIM")" "$clients" "$RESET" \
+            "$(power_meter "$power")"
         i=$((i + 1))
     done
     echo ""
@@ -1262,6 +1264,10 @@ capture_handshake() {
         echo "Handshake: $handshake_status"
     } > "$report"
 
+    # Reporte Markdown enriquecido junto al .txt
+    local report_md="${report%.txt}.md"
+    build_markdown_report "$report_md" "$handshake_status" "$cap" "${LAST_FILTERED_CAP:-N/A}"
+
     title "RESULTADO DE CAPTURA"
     if [[ "$handshake_status" == "Capturado" ]]; then
         echo -e "${GREEN}${BOLD}✓ Handshake capturado para $TARGET_SSID${RESET}"
@@ -1284,8 +1290,8 @@ capture_handshake() {
     fi
 
     echo ""
-    echo "Reporte:"
-    ls -lh "$report"
+    echo "Reportes:"
+    ls -lh "$report" "$report_md" 2>/dev/null
 
     section "Siguiente paso"
     if [[ "$handshake_status" == "Capturado" ]]; then
@@ -1428,6 +1434,350 @@ verify_handshake() {
     pause
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Utilidades compartidas: resolución de CAP y selección de diccionario
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Devuelve en la variable global PICKED_CAP un .cap válido (preferir filtrado).
+PICKED_CAP=""
+pick_cap_file() {
+    PICKED_CAP=""
+    local cap=""
+    if [[ -n "$LAST_FILTERED_CAP" && -f "$LAST_FILTERED_CAP" ]]; then
+        cap="$LAST_FILTERED_CAP"
+    elif [[ -n "$LAST_CAP" && -f "$LAST_CAP" ]]; then
+        cap="$LAST_CAP"
+    fi
+
+    if [[ -n "$cap" ]]; then
+        echo "Última captura: $cap"
+        read -r -p "ENTER para usarla, o escribe otra ruta .cap: " alt
+        [[ -n "$alt" ]] && cap="$alt"
+    else
+        warn "No hay captura registrada en esta sesión."
+        read -r -p "Ruta del archivo .cap: " cap
+    fi
+
+    if [[ ! -f "$cap" ]]; then
+        err "Archivo no encontrado: $cap"
+        return 1
+    fi
+    PICKED_CAP="$cap"
+    return 0
+}
+
+human_lines() {
+    local f="$1"
+    [[ -f "$f" ]] || { echo "?"; return; }
+    wc -l < "$f" 2>/dev/null | tr -d ' '
+}
+
+# Lista wordlists conocidas y deja la elegida en SELECTED_WORDLIST.
+select_wordlist() {
+    mkdir -p "$WORDLIST_DIR"
+    local -a found=()
+    local candidates=(
+        "/usr/share/wordlists/rockyou.txt"
+        "/usr/share/wordlists/rockyou.txt.gz"
+        "/usr/share/wordlists/fasttrack.txt"
+        "/usr/share/dict/words"
+    )
+    local c
+    for c in "${candidates[@]}"; do
+        [[ -f "$c" ]] && found+=("$c")
+    done
+    while IFS= read -r c; do
+        [[ -n "$c" ]] && found+=("$c")
+    done < <(find "$WORDLIST_DIR" -maxdepth 1 -type f \( -name '*.txt' -o -name '*.lst' -o -name '*.dict' \) 2>/dev/null | sort)
+
+    section "Diccionarios disponibles"
+    if (( ${#found[@]} == 0 )); then
+        warn "No se encontraron diccionarios. Usa el Gestor de diccionarios (opción del menú)."
+        read -r -p "Ruta manual del diccionario: " SELECTED_WORDLIST
+        [[ -f "$SELECTED_WORDLIST" ]] && return 0 || { err "No existe."; return 1; }
+    fi
+
+    printf "%-4s %-12s %s\n" "N°" "LÍNEAS" "RUTA"
+    echo "────────────────────────────────────────────────────────────────────"
+    local i=1 f tag
+    for f in "${found[@]}"; do
+        tag=""
+        [[ "$f" == *.gz ]] && tag=" ${DIM}(comprimido)${RESET}"
+        printf "%-4s %-12s %s%b\n" "$i" "$(human_lines "$f")" "$f" "$tag"
+        i=$((i + 1))
+    done
+    echo ""
+    echo "m. Ingresar ruta manual"
+    echo "0. Cancelar"
+    echo ""
+    local choice
+    read -r -p "Selecciona diccionario: " choice
+
+    case "$choice" in
+        0) return 1 ;;
+        m|M) read -r -p "Ruta: " SELECTED_WORDLIST ;;
+        *)
+            if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#found[@]} )); then
+                SELECTED_WORDLIST="${found[$((choice-1))]}"
+            else
+                err "Selección inválida."; return 1
+            fi
+            ;;
+    esac
+
+    # Descomprimir rockyou.gz automáticamente a wordlists/.
+    if [[ "$SELECTED_WORDLIST" == *.gz ]]; then
+        local dest="$WORDLIST_DIR/$(basename "${SELECTED_WORDLIST%.gz}")"
+        if [[ ! -f "$dest" ]]; then
+            warn "Descomprimiendo a $dest ..."
+            gunzip -c "$SELECTED_WORDLIST" > "$dest" 2>/dev/null || { err "No se pudo descomprimir."; return 1; }
+        fi
+        SELECTED_WORDLIST="$dest"
+    fi
+
+    [[ -f "$SELECTED_WORDLIST" ]] || { err "No existe: $SELECTED_WORDLIST"; return 1; }
+    ok "Diccionario: $SELECTED_WORDLIST ($(human_lines "$SELECTED_WORDLIST") líneas)"
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Gestor de diccionarios
+# ─────────────────────────────────────────────────────────────────────────────
+wordlist_manager() {
+    while true; do
+        title "GESTOR DE DICCIONARIOS"
+
+        section "Diccionarios en $WORDLIST_DIR/"
+        mkdir -p "$WORDLIST_DIR"
+        if compgen -G "$WORDLIST_DIR/*" >/dev/null 2>&1; then
+            local f
+            for f in "$WORDLIST_DIR"/*; do
+                [[ -f "$f" ]] && printf "  %-10s %s\n" "$(human_lines "$f")" "$(basename "$f")"
+            done
+        else
+            warn "Vacío."
+        fi
+
+        section "rockyou"
+        if [[ -f "$WORDLIST_DIR/rockyou.txt" ]]; then
+            ok "rockyou.txt ya disponible en el proyecto."
+        elif [[ -f /usr/share/wordlists/rockyou.txt ]]; then
+            ok "rockyou.txt del sistema detectado (/usr/share/wordlists/rockyou.txt)."
+        elif [[ -f /usr/share/wordlists/rockyou.txt.gz ]]; then
+            warn "rockyou.txt.gz del sistema detectado (sin descomprimir)."
+        else
+            warn "rockyou no encontrado.  sudo dnf install wordlists  (o descárgalo)."
+        fi
+
+        section "Opciones"
+        echo "1. Importar/descomprimir rockyou del sistema a $WORDLIST_DIR/"
+        echo "2. Generar wordlist numérica (crunch) — ej. celulares, PINs"
+        echo "3. Generar wordlist desde patrón personalizado (crunch)"
+        echo "4. Fijar diccionario por defecto para ataques"
+        echo "0. Volver"
+        echo ""
+        local opt
+        read -r -p "Selecciona opción: " opt
+
+        case "$opt" in
+            1)
+                local src=""
+                [[ -f /usr/share/wordlists/rockyou.txt ]] && src="/usr/share/wordlists/rockyou.txt"
+                [[ -z "$src" && -f /usr/share/wordlists/rockyou.txt.gz ]] && src="/usr/share/wordlists/rockyou.txt.gz"
+                if [[ -z "$src" ]]; then
+                    err "No se encontró rockyou en el sistema."
+                else
+                    if [[ "$src" == *.gz ]]; then
+                        gunzip -c "$src" > "$WORDLIST_DIR/rockyou.txt" && ok "Copiado y descomprimido."
+                    else
+                        cp "$src" "$WORDLIST_DIR/rockyou.txt" && ok "Copiado."
+                    fi
+                fi
+                pause
+                ;;
+            2)
+                if (( HAS_CRUNCH == 0 )); then
+                    err "crunch no está instalado:  sudo dnf install crunch"
+                    pause; continue
+                fi
+                echo ""
+                echo "Plantillas rápidas:"
+                echo "  a) 8 dígitos empezando en 9 (celulares Perú: 9XXXXXXX)"
+                echo "  b) PIN de 8 dígitos (00000000-99999999)"
+                echo "  c) Personalizado"
+                local tpl out
+                read -r -p "Elige a/b/c: " tpl
+                read -r -p "Nombre del archivo de salida (sin ruta): " out
+                [[ -n "$out" ]] || { err "Nombre vacío."; pause; continue; }
+                out="$WORDLIST_DIR/$(safe_filename "$out").txt"
+                case "$tpl" in
+                    a) warn "Generando 9XXXXXXX (10M líneas aprox)..."; crunch 8 8 1234567890 -t 9%%%%%%% -o "$out" ;;
+                    b) warn "Generando 00000000-99999999..."; crunch 8 8 1234567890 -o "$out" ;;
+                    c)
+                        local len charset tmpl
+                        read -r -p "Longitud mínima: " len
+                        local lmax
+                        read -r -p "Longitud máxima: " lmax
+                        read -r -p "Charset (ej. 1234567890abcdef): " charset
+                        read -r -p "Plantilla -t (opcional, ENTER para omitir): " tmpl
+                        if [[ -n "$tmpl" ]]; then
+                            crunch "$len" "$lmax" "$charset" -t "$tmpl" -o "$out"
+                        else
+                            crunch "$len" "$lmax" "$charset" -o "$out"
+                        fi
+                        ;;
+                    *) err "Opción inválida."; pause; continue ;;
+                esac
+                [[ -f "$out" ]] && ok "Generado: $out ($(human_lines "$out") líneas)"
+                pause
+                ;;
+            3)
+                if (( HAS_CRUNCH == 0 )); then
+                    err "crunch no está instalado:  sudo dnf install crunch"
+                    pause; continue
+                fi
+                echo ""
+                echo "Marcadores -t de crunch:  @=letra  ,=MAYÚS  %=dígito  ^=símbolo"
+                local mn mx cs tp out
+                read -r -p "Longitud mínima: " mn
+                read -r -p "Longitud máxima: " mx
+                read -r -p "Charset base (ENTER=abc...0-9): " cs
+                read -r -p "Plantilla -t (ej. Lab20%%%%): " tp
+                read -r -p "Nombre de salida (sin ruta): " out
+                out="$WORDLIST_DIR/$(safe_filename "${out:-custom}").txt"
+                cs="${cs:-abcdefghijklmnopqrstuvwxyz0123456789}"
+                if [[ -n "$tp" ]]; then
+                    crunch "$mn" "$mx" "$cs" -t "$tp" -o "$out"
+                else
+                    crunch "$mn" "$mx" "$cs" -o "$out"
+                fi
+                [[ -f "$out" ]] && ok "Generado: $out ($(human_lines "$out") líneas)"
+                pause
+                ;;
+            4)
+                select_wordlist && { ok "Por defecto: $SELECTED_WORDLIST"; }
+                pause
+                ;;
+            0) return ;;
+            *) err "Opción inválida."; pause ;;
+        esac
+    done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Hashcat / formato 22000
+# ─────────────────────────────────────────────────────────────────────────────
+convert_cap_to_22000() {
+    local cap="$1" out="$2"
+    [[ -f "$cap" ]] || return 1
+    (( HAS_HCXTOOLS == 1 )) || return 2
+    hcxpcapngtool -o "$out" "$cap" >/dev/null 2>&1
+    [[ -s "$out" ]]
+}
+
+hashcat_menu() {
+    title "HASHCAT / FORMATO 22000 (GPU)"
+
+    if (( HAS_HCXTOOLS == 0 )); then
+        err "Se requiere hcxpcapngtool para convertir .cap → .22000"
+        echo "  sudo dnf install hcxtools"
+        pause
+        return
+    fi
+
+    section "Seleccionar captura"
+    pick_cap_file || { pause; return; }
+
+    mkdir -p "$HASH_DIR"
+    local base out
+    base="$(basename "${PICKED_CAP%.*}")"
+    out="$HASH_DIR/${base}.22000"
+
+    section "Convirtiendo"
+    echo "Origen:  $PICKED_CAP"
+    echo "Destino: $out"
+    echo ""
+    if convert_cap_to_22000 "$PICKED_CAP" "$out"; then
+        LAST_22000="$out"
+        ok "Hash 22000 generado: $out"
+        echo ""
+        grep -c . "$out" 2>/dev/null | xargs -I{} echo "  Líneas de hash (PMKID/EAPOL): {}"
+    else
+        err "No se extrajo ningún hash. ¿La captura contiene handshake/PMKID válido?"
+        pause
+        return
+    fi
+
+    section "Cracking con hashcat"
+    if (( HAS_HASHCAT == 0 )); then
+        warn "hashcat no está instalado. Comando sugerido para otra máquina con GPU:"
+        echo "  hashcat -m 22000 -a 0 \"$out\" <diccionario>"
+        pause
+        return
+    fi
+
+    read -r -p "¿Ejecutar hashcat ahora con un diccionario? [s/N]: " go
+    if [[ "$go" =~ ^[sS]$ ]]; then
+        select_wordlist || { pause; return; }
+        echo ""
+        warn "Ejecutando: hashcat -m 22000 -a 0 (modo diccionario)"
+        echo ""
+        hashcat -m 22000 -a 0 "$out" "$SELECTED_WORDLIST" --status --status-timer=10
+        echo ""
+        section "Resultados (potfile)"
+        hashcat -m 22000 "$out" --show 2>/dev/null || true
+    fi
+    pause
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Reportes en Markdown
+# ─────────────────────────────────────────────────────────────────────────────
+build_markdown_report() {
+    local report="$1" handshake_status="$2" cap="$3" filtered="$4"
+    {
+        echo "# Reporte de auditoría WPA/WPA2 — CSH Framework"
+        echo ""
+        echo "> Uso exclusivo en laboratorio propio o con autorización explícita."
+        echo ""
+        echo "| Campo | Valor |"
+        echo "|---|---|"
+        echo "| Fecha | $(date '+%Y-%m-%d %H:%M:%S') |"
+        echo "| Operador | $(logname 2>/dev/null || echo "${SUDO_USER:-root}") |"
+        echo "| SSID | ${TARGET_SSID:-N/A} |"
+        echo "| BSSID | ${TARGET_BSSID:-N/A} |"
+        echo "| Canal | ${TARGET_CHANNEL:-N/A} |"
+        echo "| Frecuencia | $(channel_to_freq "$TARGET_CHANNEL") |"
+        echo "| Cifrado | $(encr_label "$TARGET_PRIVACY" "$TARGET_AUTH") |"
+        echo "| Privacy | ${TARGET_PRIVACY:-N/A} |"
+        echo "| Cipher | ${TARGET_CIPHER:-N/A} |"
+        echo "| Auth | ${TARGET_AUTH:-N/A} |"
+        echo "| Potencia | ${TARGET_POWER:-N/A} |"
+        echo "| Handshake | ${handshake_status:-N/A} |"
+        echo ""
+        echo "## Archivos"
+        echo ""
+        echo "- CAP crudo: \`${cap:-N/A}\`"
+        echo "- CAP filtrado: \`${filtered:-N/A}\`"
+        echo "- Hash 22000: \`${LAST_22000:-N/A}\`"
+        echo ""
+        echo "## Próximos pasos sugeridos"
+        echo ""
+        if [[ "$handshake_status" == "Capturado" ]]; then
+            echo "1. Verificar el handshake con \`aircrack-ng\`."
+            echo "2. Convertir a formato 22000 y crackear con hashcat (GPU)."
+            echo "3. Validar contra el diccionario autorizado del laboratorio."
+        else
+            echo "1. Asegurar que haya clientes asociados al AP."
+            echo "2. Repetir captura con deauth dirigido a un cliente."
+            echo "3. Ampliar el timeout de captura."
+        fi
+        echo ""
+        echo "---"
+        echo "_Generado por CSH WPA-2 Framework v${APP_VERSION}._"
+    } > "$report"
+}
+
 dictionary_attack() {
     title "VALIDACIÓN CON DICCIONARIO"
 
@@ -1454,13 +1804,14 @@ dictionary_attack() {
         [[ "$cont" =~ ^[sS]$ ]] || return
     fi
 
-    echo ""
-    echo "Ejemplos:"
-    echo "  /usr/share/wordlists/rockyou.txt"
-    echo "  $WORDLIST_DIR/mi_diccionario.txt"
-    echo ""
-    local wordlist
-    read -r -p "Ruta del diccionario: " wordlist
+    local wordlist=""
+    if select_wordlist; then
+        wordlist="$SELECTED_WORDLIST"
+    else
+        warn "Sin diccionario seleccionado."
+        pause
+        return
+    fi
 
     if [[ ! -f "$wordlist" ]]; then
         err "Diccionario no encontrado: $wordlist"
@@ -1490,10 +1841,17 @@ list_artifacts() {
     fi
 
     section "Reportes recientes"
-    if compgen -G "$REPORT_DIR/*.txt" >/dev/null 2>&1; then
-        find "$REPORT_DIR" -maxdepth 1 -type f -name '*.txt' -printf '%TY-%Tm-%Td %TH:%TM  %p\n' | sort -r | head -n 20
+    if compgen -G "$REPORT_DIR/*.txt" >/dev/null 2>&1 || compgen -G "$REPORT_DIR/*.md" >/dev/null 2>&1; then
+        find "$REPORT_DIR" -maxdepth 1 -type f \( -name '*.txt' -o -name '*.md' \) -printf '%TY-%Tm-%Td %TH:%TM  %p\n' | sort -r | head -n 20
     else
         warn "No hay reportes todavía."
+    fi
+
+    section "Hashes 22000 (hashcat)"
+    if compgen -G "$HASH_DIR/*.22000" >/dev/null 2>&1; then
+        find "$HASH_DIR" -maxdepth 1 -type f -name '*.22000' -printf '%TY-%Tm-%Td %TH:%TM  %p\n' | sort -r | head -n 20
+    else
+        warn "Sin hashes convertidos. Usa el menú de hashcat."
     fi
 
     pause
@@ -1585,13 +1943,16 @@ settings_menu() {
         printf "%-22s %ss\n" "Timeout captura:" "$CAPTURE_TIMEOUT"
         printf "%-22s %s\n" "Dir capturas:" "$CAPTURE_DIR"
         printf "%-22s %s\n" "Dir reportes:" "$REPORT_DIR"
+        printf "%-22s %s\n" "Dir hashes:" "$HASH_DIR"
+        printf "%-22s %s\n" "Dir wordlists:" "$WORDLIST_DIR"
 
         section "Opciones"
         echo "1. Cambiar interfaz"
         echo "2. Activar / validar modo monitor"
-        echo "3. Cambiar tiempo de escaneo"
-        echo "4. Cambiar timeout de captura"
-        echo "5. Resetear autorización de sesión"
+        echo "3. Restaurar WiFi normal (modo managed)"
+        echo "4. Cambiar tiempo de escaneo"
+        echo "5. Cambiar timeout de captura"
+        echo "6. Resetear autorización de sesión"
         echo "0. Volver"
         echo ""
 
@@ -1606,6 +1967,9 @@ settings_menu() {
                 pause
                 ;;
             3)
+                restore_managed_mode
+                ;;
+            4)
                 read -r -p "Nuevo tiempo de escaneo en segundos: " val
                 if [[ "$val" =~ ^[0-9]+$ && "$val" -ge 3 ]]; then
                     SCAN_SECONDS="$val"
@@ -1615,7 +1979,7 @@ settings_menu() {
                 fi
                 pause
                 ;;
-            4)
+            5)
                 read -r -p "Nuevo timeout de captura en segundos: " val
                 if [[ "$val" =~ ^[0-9]+$ && "$val" -ge 10 ]]; then
                     CAPTURE_TIMEOUT="$val"
@@ -1625,7 +1989,7 @@ settings_menu() {
                 fi
                 pause
                 ;;
-            5)
+            6)
                 AUTHORIZED_SESSION=0
                 ok "Autorización de sesión reiniciada."
                 pause
@@ -1641,33 +2005,77 @@ settings_menu() {
     done
 }
 
+# Badge de capacidad: verde si disponible, gris si no.
+cap_badge() {
+    local flag="$1" name="$2"
+    if (( flag == 1 )); then
+        printf "%b●%b %s  " "$GREEN" "$RESET" "$name"
+    else
+        printf "%b○%b %b%s%b  " "$DARK_GREY" "$RESET" "$DIM" "$name" "$RESET"
+    fi
+}
+
+dashboard() {
+    local iface_type iface_badge
+    iface_type="$(get_iface_type)"
+    [[ -z "$iface_type" || "$iface_type" == "N/A" ]] && iface_type="desconocido"
+    if [[ "$iface_type" == "monitor" ]]; then
+        iface_badge="${GREEN}● monitor${RESET}"
+    elif [[ "$INTERFACE" == "N/A" || -z "$INTERFACE" ]]; then
+        iface_badge="${RED}○ sin interfaz${RESET}"
+    else
+        iface_badge="${YELLOW}● ${iface_type}${RESET}"
+    fi
+
+    section "Estado de la sesión"
+    printf "  %-14s %s  [%b]\n" "Interfaz:" "${INTERFACE:-N/A}" "$iface_badge"
+    printf "  %-14s %s\n" "Canal/Freq:" "$(get_iface_channel) / $(get_iface_frequency)"
+
+    local ncap nrep nhash
+    ncap=$(find "$CAPTURE_DIR" -maxdepth 1 -name '*.cap' 2>/dev/null | grep -c .)
+    nrep=$(find "$REPORT_DIR" -maxdepth 1 \( -name '*.txt' -o -name '*.md' \) 2>/dev/null | grep -c .)
+    nhash=$(find "$HASH_DIR" -maxdepth 1 -name '*.22000' 2>/dev/null | grep -c .)
+    printf "  %-14s %s capturas · %s reportes · %s hashes 22000\n" "Artefactos:" "$ncap" "$nrep" "$nhash"
+
+    printf "  %-14s " "Capacidades:"
+    cap_badge "$HAS_TSHARK" "tshark"
+    cap_badge "$HAS_HCXTOOLS" "hcxtools"
+    cap_badge "$HAS_HASHCAT" "hashcat"
+    cap_badge "$HAS_CRUNCH" "crunch"
+    echo ""
+
+    section "Objetivo actual"
+    if [[ -n "$TARGET_BSSID" ]]; then
+        local enc; enc="$(encr_label "$TARGET_PRIVACY" "$TARGET_AUTH")"
+        printf "  %b%s%b   %b%s%b\n" "$BOLD$GREEN" "${TARGET_SSID:-<hidden>}" "$RESET" "$(encr_color "$enc")" "$enc" "$RESET"
+        printf "  %-10s %s   %-8s %s   %-7s %s\n" "BSSID:" "$TARGET_BSSID" "Canal:" "$TARGET_CHANNEL" "Señal:" "$(power_meter "$TARGET_POWER")"
+    else
+        warn "No hay objetivo seleccionado — empieza por escanear (opción 1)."
+    fi
+}
+
 main_menu() {
     while true; do
-        title "MENÚ DE SELECCIÓN"
+        title "CONSOLA PRINCIPAL"
+        dashboard
 
-        section "Interfaz"
-        show_interface_info
+        section "RECON"
+        echo -e "  ${CYAN}1.${RESET} Escanear redes y seleccionar objetivo"
+        echo -e "  ${CYAN}2.${RESET} Ver información completa del objetivo"
 
-        section "Objetivo actual"
-        if [[ -n "$TARGET_BSSID" ]]; then
-            echo -e "${GREEN}${BOLD}$TARGET_SSID${RESET}"
-            echo "BSSID: $TARGET_BSSID"
-            echo "Canal: $TARGET_CHANNEL"
-            echo "Auth:  $TARGET_AUTH"
-            echo "Enc:   $TARGET_PRIVACY / $TARGET_CIPHER"
-        else
-            warn "No hay objetivo seleccionado."
-        fi
+        section "CAPTURA"
+        echo -e "  ${CYAN}3.${RESET} Captura de handshake / deauth autorizado"
 
-        section "Menú"
-        echo -e "${CYAN}1.${RESET} Escanear redes y seleccionar objetivo"
-        echo -e "${CYAN}2.${RESET} Ver información completa del objetivo"
-        echo -e "${CYAN}3.${RESET} Captura / acción autorizada"
-        echo -e "${CYAN}4.${RESET} Verificar handshake en CAP"
-        echo -e "${CYAN}5.${RESET} Validar CAP con diccionario"
-        echo -e "${CYAN}6.${RESET} Capturas y reportes"
-        echo -e "${CYAN}7.${RESET} Configuración"
-        echo -e "${RED}0.${RESET} Salir"
+        section "CRACKING"
+        echo -e "  ${CYAN}4.${RESET} Verificar handshake en CAP"
+        echo -e "  ${CYAN}5.${RESET} Validar CAP con diccionario (aircrack-ng)"
+        echo -e "  ${CYAN}6.${RESET} Hashcat — convertir a 22000 y crackear (GPU)"
+        echo -e "  ${CYAN}7.${RESET} Gestor de diccionarios"
+
+        section "GESTIÓN"
+        echo -e "  ${CYAN}8.${RESET} Capturas, reportes y hashes"
+        echo -e "  ${CYAN}9.${RESET} Configuración / interfaz / restaurar WiFi"
+        echo -e "  ${RED}0.${RESET} Salir"
 
         echo ""
         local opt
@@ -1679,8 +2087,10 @@ main_menu() {
             3) capture_menu ;;
             4) verify_handshake ;;
             5) dictionary_attack ;;
-            6) list_artifacts ;;
-            7) settings_menu ;;
+            6) hashcat_menu ;;
+            7) wordlist_manager ;;
+            8) list_artifacts ;;
+            9) settings_menu ;;
             0)
                 cleanup_all
                 clear_screen
@@ -1704,7 +2114,7 @@ main() {
     require_root
     require_deps
 
-    mkdir -p "$CAPTURE_DIR" "$REPORT_DIR" "$WORDLIST_DIR"
+    mkdir -p "$CAPTURE_DIR" "$REPORT_DIR" "$WORDLIST_DIR" "$HASH_DIR"
 
     if [[ -n "$INTERFACE" ]] && ! interface_exists "$INTERFACE"; then
         warn "La interfaz '$INTERFACE' no existe. Se abrirá el selector."
