@@ -27,14 +27,21 @@ if [[ -x ".venv/bin/python" ]]; then
     PY=".venv/bin/python"
 elif command -v uv >/dev/null 2>&1; then
     echo "[*] Preparando entorno con uv…"
-    uv venv >/dev/null 2>&1 || true
-    uv pip install -q "textual>=0.60" >/dev/null 2>&1
+    uv venv || { echo "[!] 'uv venv' falló."; exit 1; }
+    uv pip install "textual>=0.60" || { echo "[!] No se pudo instalar textual con uv."; exit 1; }
     PY=".venv/bin/python"
 else
     echo "[*] uv no encontrado; usando python -m venv…"
-    python3 -m venv .venv
-    .venv/bin/pip install -q --upgrade pip "textual>=0.60"
+    python3 -m venv .venv || { echo "[!] No se pudo crear el venv."; exit 1; }
+    .venv/bin/pip install --upgrade pip "textual>=0.60" || { echo "[!] No se pudo instalar textual con pip."; exit 1; }
     PY=".venv/bin/python"
+fi
+
+# Verificar que Textual realmente está disponible antes de arrancar.
+if ! "$PY" -c "import textual" 2>/dev/null; then
+    echo "[!] Textual no está disponible en $PY."
+    echo "    Instala manualmente:  uv pip install 'textual>=0.60'   (o pip install)"
+    exit 1
 fi
 
 # 2) Ejecutar. Si no somos root y no se pidió demo, intentar sudo conservando el venv.

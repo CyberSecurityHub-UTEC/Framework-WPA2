@@ -144,6 +144,7 @@ class TargetScreen(ModalScreen):
         self.demo = demo
         self.session: be.CaptureSession | None = None
         self._cap_timer = None
+        self._crack_proc = None  # subprocess.Popen del aircrack en curso
 
     def compose(self) -> ComposeResult:
         with Container(id="dialog", classes="modal-wrap"):
@@ -299,16 +300,25 @@ class TargetScreen(ModalScreen):
             ["aircrack-ng", "-a2", "-b", self.net.bssid, "-w", wordlist, cap],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
+        self._crack_proc = proc
         key = None
-        for line in proc.stdout:  # type: ignore
-            if "KEY FOUND" in line:
-                key = line.strip()
-                break
-        proc.terminate()
+        try:
+            for line in proc.stdout:  # type: ignore
+                if "KEY FOUND" in line:
+                    key = line.strip()
+                    break
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except Exception:
+                    proc.kill()
+            self._crack_proc = None
         if key:
             self.app.call_from_thread(self._log, f"[#6ee787]✓ {key}[/]")
         else:
-            self.app.call_from_thread(self._log, "[#ffb454]! Clave no encontrada en ese diccionario.[/]")
+            self.app.call_from_thread(self._log, "[#ffb454]! Clave no encontrada o cancelada.[/]")
 
     @on(Button.Pressed, "#hc")
     def _hashcat(self) -> None:
@@ -338,11 +348,34 @@ class TargetScreen(ModalScreen):
 
     @on(Button.Pressed, "#close")
     def _close(self) -> None:
+        self._teardown()
+        self.app.pop_screen()
+
+    def _teardown(self) -> None:
+        """Detiene captura, crack y workers para no dejar procesos huérfanos."""
         if self.session:
             self.session.stop()
+            self.session = None
         if self._cap_timer:
             self._cap_timer.stop()
-        self.app.pop_screen()
+            self._cap_timer = None
+        proc = self._crack_proc
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+        self._crack_proc = None
+        try:
+            self.workers.cancel_all()
+        except Exception:
+            pass
+
+    def on_unmount(self) -> None:
+        # Red de seguridad: si la pantalla se desmonta por cualquier vía (p.ej. salir
+        # de la app), no dejar aircrack/airodump corriendo.
+        self._teardown()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -477,6 +510,7 @@ class ScannerScreen(Screen):
         self.ssid_filter = ""
         self.scan_timer = None
         self.selected_bssid: str | None = None
+        self._resume_scan = False
 
     def compose(self) -> ComposeResult:
         yield Static(id="brandband")
@@ -695,8 +729,19 @@ class ScannerScreen(Screen):
         if not net:
             self.query_one("#log", RichLog).write(f"[{C_AMBER}]▸[/] Selecciona una red primero.")
             return
+        # Liberar la radio: un airodump de captura no puede competir con el del scanner
+        # (channel-hopping) sobre la misma interfaz monitor. Se reanuda al volver.
+        self._resume_scan = self.scanning
+        if self.scanning:
+            self._stop_scan()
         demo = not be.is_root()
         self.app.push_screen(TargetScreen(net, self.app.interface or "", demo))  # type: ignore
+
+    def on_screen_resume(self) -> None:
+        # Al cerrar el objetivo (u otro modal), reanudar el escaneo si estaba activo.
+        if getattr(self, "_resume_scan", False) and not self.scanning:
+            self._resume_scan = False
+            self._start_scan()
 
     def action_cycle_enc(self) -> None:
         self.enc_idx = (self.enc_idx + 1) % len(self.ENC_FILTERS)
