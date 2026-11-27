@@ -837,7 +837,8 @@ class InterfaceScreen(Screen):
         ))
         root = "root" if be.is_root() else "sin root (modo demo)"
         self.query_one("#pickhint", Static).update(Text.from_markup(
-            f"[{C_DIM}]Elige la antena externa (USB) para la sesión.  "
+            f"[{C_DIM}]Elige la interfaz para la sesión. Se listan todas las WiFi; "
+            f"las externas (USB) van primero y resaltadas.  "
             f"Sesión: [/][{C_TEAL}]{root}[/][{C_DIM}].  "
             f"Enter selecciona · r refresca.[/]"
         ))
@@ -847,25 +848,40 @@ class InterfaceScreen(Screen):
             f"[{C_AMBER} b]q[/][{C_DIM}] salir[/]"
         ))
         t = self.query_one("#ifaces", DataTable)
-        t.add_columns(" ", "INTERFAZ", "MODO", "MAC", "CANAL")
-        t.border_title = "ANTENAS EXTERNAS (USB)"
+        t.add_columns(" ", "INTERFAZ", "BUS", "MODO", "MAC", "CANAL")
+        t.border_title = "INTERFACES WIFI"
         self._load()
         t.focus()
 
     def _load(self) -> None:
         t = self.query_one("#ifaces", DataTable)
         t.clear()
-        ifs = be.list_interfaces(external_only=True)
+        # Todas las interfaces WiFi (como wifite3), sin ocultar la NIC interna.
+        ifs = be.list_interfaces()
+        # Externas (USB) primero para que queden preseleccionadas.
+        ifs.sort(key=lambda i: (not i.get("external", False), i["iface"]))
         if not ifs:
-            t.add_row("·", Text("No se detectó antena externa (USB)", style=C_AMBER), "", "", "")
-            t.add_row("·", Text("Conecta la MT7612U y pulsa r para refrescar", style=C_DIM), "", "", "")
+            t.add_row("·", Text("No se detectó ninguna interfaz WiFi", style=C_AMBER), "", "", "", "")
+            t.add_row("·", Text("Conecta una antena y pulsa r para refrescar", style=C_DIM), "", "", "", "")
             return
         for i in ifs:
+            ext = i.get("external", False)
+            bus = (i.get("bus") or "other").lower()
+            if ext:
+                marker, mstyle = "◆", C_TEAL
+                bus_txt = Text("USB · externa", style=C_TEAL)
+            elif bus == "pci":
+                marker, mstyle = "○", C_DIM
+                bus_txt = Text("PCI · interna", style=C_AMBER)
+            else:
+                marker, mstyle = "○", C_DIM
+                bus_txt = Text(bus, style=C_DIM)
             typ = i["type"]
             tcolor = C_GREEN if typ == "monitor" else (C_AMBER if typ != "N/A" else C_DIM)
             t.add_row(
-                Text("◆", style=C_TEAL),
-                Text(i["iface"], style=f"b {C_INK}"),
+                Text(marker, style=mstyle),
+                Text(i["iface"], style=f"b {C_INK}" if ext else C_INK),
+                bus_txt,
                 Text(typ, style=tcolor),
                 Text(i["mac"], style="#8a98a0"),
                 Text(str(i["channel"]), style=C_INK),
