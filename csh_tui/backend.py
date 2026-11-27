@@ -145,22 +145,49 @@ def iface_mac(iface: str) -> str:
     return iface_field(iface, "addr")
 
 
-def list_interfaces() -> list[dict]:
-    """Devuelve interfaces WiFi (excluye P2P)."""
+def iface_bus(iface: str) -> str:
+    """Bus físico de la interfaz: 'usb' (antena externa), 'pci' (NIC interna) u 'other'."""
+    try:
+        sub = os.path.realpath(f"/sys/class/net/{iface}/device/subsystem")
+        return os.path.basename(sub).lower()
+    except Exception:
+        return "other"
+
+
+def iface_is_external(iface: str) -> bool:
+    """True si la interfaz es una antena externa (adaptador USB)."""
+    return iface_bus(iface) == "usb"
+
+
+def list_interfaces(external_only: bool = False) -> list[dict]:
+    """Devuelve interfaces WiFi (excluye P2P).
+
+    external_only=True descarta la NIC interna (PCI) y deja solo
+    antenas externas USB (p. ej. MT7612U).
+    """
     out = []
     try:
         raw = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=5).stdout
     except Exception:
         return out
+
+    def _flush(iface, typ, addr, chan, phy):
+        if not iface or typ == "P2P-device":
+            return
+        bus = iface_bus(iface)
+        if external_only and bus != "usb":
+            return
+        out.append({"phy": phy, "iface": iface, "type": typ or "N/A",
+                    "mac": addr or "N/A", "channel": chan or "N/A",
+                    "bus": bus, "external": bus == "usb"})
+
     phy = iface = typ = addr = chan = None
     for line in raw.splitlines():
         s = line.strip()
         if line.startswith("phy#"):
             phy = line.strip()
         elif s.startswith("Interface"):
-            if iface and typ != "P2P-device":
-                out.append({"phy": phy, "iface": iface, "type": typ or "N/A",
-                            "mac": addr or "N/A", "channel": chan or "N/A"})
+            _flush(iface, typ, addr, chan, phy)
             iface = s.split()[1]
             typ = addr = chan = None
         elif s.startswith("addr"):
@@ -169,9 +196,7 @@ def list_interfaces() -> list[dict]:
             typ = s.split()[1]
         elif s.startswith("channel"):
             chan = s.split()[1]
-    if iface and typ != "P2P-device":
-        out.append({"phy": phy, "iface": iface, "type": typ or "N/A",
-                    "mac": addr or "N/A", "channel": chan or "N/A"})
+    _flush(iface, typ, addr, chan, phy)
     return out
 
 
