@@ -4,12 +4,22 @@ set -uo pipefail
 APP_NAME="CSH WPA-2 FRAMEWORK"
 APP_SUBTITLE="Lab Console"
 
+APP_VERSION="2.0"
+
 INTERFACE=""
+ORIGINAL_IFACE=""          # interfaz "managed" original, para restaurar
 SCAN_SECONDS=12
 CAPTURE_TIMEOUT=300
 CAPTURE_DIR="captures"
 REPORT_DIR="reports"
 WORDLIST_DIR="wordlists"
+HASH_DIR="hashes"          # capturas convertidas a formato hashcat 22000
+
+# Capacidades opcionales (se autodetectan en require_deps)
+HAS_TSHARK=0
+HAS_HASHCAT=0
+HAS_HCXTOOLS=0
+HAS_CRUNCH=0
 
 TARGET_BSSID=""
 TARGET_CHANNEL=""
@@ -23,7 +33,9 @@ TARGET_BEACONS=""
 LAST_CAP=""
 LAST_FILTERED_CAP=""
 LAST_SCAN_CSV=""
+LAST_22000=""
 SELECTED_CLIENT=""
+SELECTED_WORDLIST=""
 
 AIRODUMP_PID=""
 SCAN_PID=""
@@ -364,11 +376,39 @@ require_deps() {
         exit 1
     fi
 
+    echo ""
+    section "Herramientas opcionales (desbloquean funciones extra)"
+
     if command -v tshark >/dev/null 2>&1; then
-        ok "tshark instalado, se podrá generar PCAP filtrado por objetivo"
+        HAS_TSHARK=1
+        ok "tshark — permite generar CAP filtrado por objetivo"
     else
-        warn "tshark no instalado. Opcional para generar CAP filtrado:"
-        echo "  sudo dnf install wireshark-cli"
+        HAS_TSHARK=0
+        warn "tshark ausente → sin CAP filtrado   (sudo dnf install wireshark-cli)"
+    fi
+
+    if command -v hashcat >/dev/null 2>&1; then
+        HAS_HASHCAT=1
+        ok "hashcat — cracking por GPU con formato 22000"
+    else
+        HAS_HASHCAT=0
+        warn "hashcat ausente → sin cracking GPU   (sudo dnf install hashcat)"
+    fi
+
+    if command -v hcxpcapngtool >/dev/null 2>&1; then
+        HAS_HCXTOOLS=1
+        ok "hcxpcapngtool — conversión .cap → .22000 (hashcat/PMKID)"
+    else
+        HAS_HCXTOOLS=0
+        warn "hcxtools ausente → sin conversión 22000   (sudo dnf install hcxtools)"
+    fi
+
+    if command -v crunch >/dev/null 2>&1; then
+        HAS_CRUNCH=1
+        ok "crunch — generación de diccionarios por patrón"
+    else
+        HAS_CRUNCH=0
+        warn "crunch ausente → generador de wordlists limitado   (sudo dnf install crunch)"
     fi
 }
 
@@ -520,6 +560,9 @@ ensure_monitor_mode() {
         return 0
     fi
 
+    # Recordar la interfaz managed original para poder restaurarla luego.
+    [[ -z "$ORIGINAL_IFACE" ]] && ORIGINAL_IFACE="$INTERFACE"
+
     title "MODO MONITOR"
     section "Interfaz actual"
     show_interface_info
@@ -597,6 +640,81 @@ ensure_monitor_mode() {
     esac
 }
 
+restore_managed_mode() {
+    title "RESTAURAR WIFI NORMAL (MANAGED)"
+
+    local target="$INTERFACE"
+    local type
+    type="$(get_iface_type)"
+
+    if [[ -z "$target" ]]; then
+        warn "No hay interfaz seleccionada."
+        pause
+        return
+    fi
+
+    if [[ "$type" != "monitor" ]]; then
+        ok "La interfaz '$target' ya está en modo '${type:-managed}'. No hay nada que restaurar."
+        pause
+        return
+    fi
+
+    section "Interfaz actual"
+    show_interface_info
+
+    warn "Se devolverá '$target' a modo managed y se reactivará NetworkManager."
+    echo ""
+    read -r -p "¿Continuar? [s/N]: " go
+    [[ "$go" =~ ^[sS]$ ]] || { warn "Cancelado."; pause; return; }
+
+    section "Restaurando"
+    cleanup_runtime
+
+    local restored=""
+
+    # 1) Si airmon-ng creó una interfaz tipo 'wlan0mon', intentamos 'airmon-ng stop'.
+    if command -v airmon-ng >/dev/null 2>&1; then
+        warn "Intentando 'airmon-ng stop $target'..."
+        airmon-ng stop "$target" >/dev/null 2>&1 || true
+        sleep 1
+    fi
+
+    # 2) Determinar qué interfaz quedó viva para forzarla a managed con iw.
+    if interface_exists "$target"; then
+        restored="$target"
+    elif [[ -n "$ORIGINAL_IFACE" ]] && interface_exists "$ORIGINAL_IFACE"; then
+        restored="$ORIGINAL_IFACE"
+    else
+        restored="$(list_wifi_interfaces | awk -F'|' '$3 != "monitor" {print $2; exit}')"
+    fi
+
+    if [[ -n "$restored" ]]; then
+        ip link set "$restored" down 2>/dev/null || true
+        iw dev "$restored" set type managed 2>/dev/null || true
+        ip link set "$restored" up 2>/dev/null || true
+        INTERFACE="$restored"
+    fi
+
+    warn "Reactivando NetworkManager..."
+    systemctl start NetworkManager >/dev/null 2>&1 || true
+    sleep 1
+
+    section "Resultado"
+    if [[ "$(get_iface_type)" != "monitor" ]]; then
+        ok "Interfaz '$INTERFACE' restaurada a modo managed."
+        ORIGINAL_IFACE=""
+    else
+        err "No se pudo confirmar el cambio. Revisa manualmente:"
+        echo "  sudo ip link set $INTERFACE down"
+        echo "  sudo iw dev $INTERFACE set type managed"
+        echo "  sudo ip link set $INTERFACE up"
+        echo "  sudo systemctl restart NetworkManager"
+    fi
+
+    show_interface_info
+    pause
+}
+
 parse_networks() {
     local csv="$1"
 
@@ -645,21 +763,86 @@ parse_clients_for_bssid() {
     ' "$csv" 2>/dev/null
 }
 
+# Normaliza privacy/auth/cipher de airodump a una etiqueta corta de cifrado.
+encr_label() {
+    local privacy="$1" auth="$2"
+    local blob="$privacy $auth"
+    if   echo "$blob" | grep -qi "WPA3\|SAE"; then echo "WPA3"
+    elif echo "$blob" | grep -qi "WPA2";       then echo "WPA2"
+    elif echo "$blob" | grep -qi "WPA";        then echo "WPA"
+    elif echo "$blob" | grep -qi "WEP";        then echo "WEP"
+    elif echo "$blob" | grep -qiE "OPN|Open";  then echo "OPN"
+    else echo "?"
+    fi
+}
+
+encr_color() {
+    case "$1" in
+        WPA3) printf "%b" "$MAGENTA" ;;   # SAE: no se valida con aircrack clásico
+        WPA2) printf "%b" "$GREEN"   ;;   # objetivo típico de laboratorio
+        WPA)  printf "%b" "$YELLOW"  ;;
+        WEP)  printf "%b" "$RED"     ;;
+        OPN)  printf "%b" "$CYAN"    ;;
+        *)    printf "%b" "$WHITE"   ;;
+    esac
+}
+
+# Barra de señal de 4 segmentos + dBm, coloreada por intensidad.
+power_meter() {
+    local pwr="$1"
+    [[ "$pwr" =~ ^-?[0-9]+$ ]] || { printf "····  n/a"; return; }
+    local v="$pwr"
+    (( v > 0 )) && v=$(( -v ))
+    if (( v == -1 )); then printf "····  n/a"; return; fi
+
+    local level color
+    if   (( v >= -55 )); then level=4; color="$GREEN"
+    elif (( v >= -67 )); then level=3; color="$GREEN"
+    elif (( v >= -75 )); then level=2; color="$YELLOW"
+    elif (( v >= -85 )); then level=1; color="$RED"
+    else                       level=0; color="$RED"
+    fi
+
+    local bar="" seg
+    for seg in 1 2 3 4; do
+        if (( seg <= level )); then bar+="▇"; else bar+="·"; fi
+    done
+    printf "%b%s%b %4sdBm" "$color" "$bar" "$RESET" "$v"
+}
+
+# Cuenta clientes asociados a un BSSID en el CSV dado (silencioso si no hay CSV).
+count_clients() {
+    local csv="$1" bssid="$2"
+    [[ -n "$csv" && -f "$csv" ]] || { echo 0; return; }
+    parse_clients_for_bssid "$csv" "$bssid" | grep -c . || echo 0
+}
+
 print_network_table() {
     local arr_name="$1"
+    local csv="${2:-$LAST_SCAN_CSV}"
     local -n arr_ref="$arr_name"
 
-    printf "%-4s %-19s %-7s %-8s %-14s %-12s %-10s %s\n" \
-        "N°" "BSSID" "CANAL" "PWR" "PRIVACY" "AUTH" "CIPHER" "SSID"
-    echo "──────────────────────────────────────────────────────────────────────────────────────────────"
+    printf "%b%-4s %-22s %-19s %-4s %-5s %-16s %-3s%b\n" \
+        "$BOLD" "N°" "ESSID" "BSSID" "CH" "ENCR" "SEÑAL" "CL" "$RESET"
+    printf "%b%s%b\n" "$DARK_GREY" "$(repeat_char '─' 78)" "$RESET"
 
-    local i=1 item bssid channel power privacy cipher auth beacons ssid
+    local i=1 item bssid channel power privacy cipher auth beacons ssid enc ecolor clients name
     for item in "${arr_ref[@]}"; do
         IFS='|' read -r bssid channel power privacy cipher auth beacons ssid <<< "$item"
-        printf "%-4s %-19s %-7s %-8s %-14s %-12s %-10s %s\n" \
-            "$i" "$bssid" "$channel" "$power" "$privacy" "$auth" "$cipher" "$ssid"
+        enc="$(encr_label "$privacy" "$auth")"
+        ecolor="$(encr_color "$enc")"
+        clients="$(count_clients "$csv" "$bssid")"
+        name="$ssid"
+        [[ "$name" == "<hidden>" ]] && name="· oculta ·"
+
+        printf "%-4s %-22.22s %-19s %-4s ${ecolor}%-5s${RESET} %-16s %b%-3s%b\n" \
+            "$i" "$name" "$bssid" "$channel" "$enc" "$(power_meter "$power")" \
+            "$([[ "$clients" -gt 0 ]] && printf "%b" "$CYAN" || printf "%b" "$DIM")" "$clients" "$RESET"
         i=$((i + 1))
     done
+    echo ""
+    printf "%b" "$DIM"
+    echo "Leyenda: ENCR → ${RESET}${MAGENTA}WPA3${RESET}${DIM} (SAE, no aircrack) · ${RESET}${GREEN}WPA2${RESET}${DIM} · ${RESET}${YELLOW}WPA${RESET}${DIM} · ${RESET}${RED}WEP${RESET}${DIM} · ${RESET}${CYAN}OPN${RESET}${DIM}   CL = clientes asociados${RESET}"
 }
 
 channel_to_freq() {
@@ -736,7 +919,7 @@ scan_networks() {
     fi
 
     section "Redes detectadas"
-    print_network_table SCAN_RESULTS
+    print_network_table SCAN_RESULTS "$csv"
 
     section "Selección"
     local choice idx selected
