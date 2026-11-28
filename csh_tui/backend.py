@@ -296,54 +296,148 @@ def list_interfaces(external_only: bool = False) -> list[dict]:
     return out
 
 
-def enable_monitor(iface: str) -> tuple[bool, str, str]:
-    """Activa modo monitor. Devuelve (ok, nueva_iface, log)."""
-    log = []
-    subprocess.run(["airmon-ng", "check", "kill"], capture_output=True, text=True)
-    log.append("airmon-ng check kill")
-    before = {i["iface"] for i in list_interfaces()}
-    subprocess.run(["airmon-ng", "start", iface], capture_output=True, text=True)
-    log.append(f"airmon-ng start {iface}")
-    time.sleep(1)
-    after = list_interfaces()
-    # Preferir una interfaz monitor nueva o con sufijo mon.
-    mon = None
+def _iface_phy(iface: str, snapshot: list[dict] | None = None) -> str | None:
+    """phy a la que pertenece `iface`, buscando en un snapshot de list_interfaces()."""
+    for i in (snapshot if snapshot is not None else list_interfaces()):
+        if i["iface"] == iface:
+            return i["phy"]
+    return None
+
+
+def select_monitor_interface(before: set[str], after: list[dict], target: str) -> str | None:
+    """Selecciona la interfaz monitor que pertenece a `target` y NADA MÁS.
+
+    Función PURA (sin subprocess) para poder testearla aisladamente.
+
+    `before` es un conjunto de nombres de interfaz previos a activar monitor.
+    `after` es la lista actual de list_interfaces() (cada dict con las claves
+    iface, type, phy, bus, mac, channel, external). `target` es la interfaz que
+    el usuario eligió.
+
+    Reglas, por prioridad:
+      (a) si `target` ahora es type=="monitor", devolver `target`;
+      (b) una interfaz NUEVA (en `after` pero no en `before`) cuyo nombre derive
+          de target — nombre == target+"mon", o empiece por target, o comparta la
+          phy de target — y type=="monitor";
+      (c) una interfaz monitor cuya phy coincida con la de target.
+    NUNCA devuelve una interfaz monitor ajena a target (otra phy Y nombre no
+    relacionado). Devuelve None si nada coincide.
+    """
+    # phy de target: solo se conoce si target sigue presente en `after`.
+    target_phy = _iface_phy(target, after)
+
+    # (a) la propia target quedó en monitor.
     for i in after:
-        if i["type"] == "monitor" and (i["iface"] not in before or i["iface"].endswith("mon")):
-            mon = i["iface"]
-            break
-    if not mon:
+        if i["iface"] == target and i["type"] == "monitor":
+            return target
+
+    def _name_derives(name: str) -> bool:
+        return name == f"{target}mon" or name.startswith(target)
+
+    # (b) interfaz NUEVA (no estaba antes) derivada de target y en monitor.
+    for i in after:
+        if i["type"] != "monitor" or i["iface"] in before:
+            continue
+        same_phy = target_phy is not None and i["phy"] == target_phy
+        if _name_derives(i["iface"]) or same_phy:
+            return i["iface"]
+
+    # (c) cualquier monitor en la MISMA phy que target.
+    if target_phy is not None:
         for i in after:
-            if i["type"] == "monitor":
-                mon = i["iface"]
-                break
-    if mon:
-        return True, mon, "\n".join(log)
-    # fallback iw
+            if i["type"] == "monitor" and i["phy"] == target_phy:
+                return i["iface"]
+
+    return None
+
+
+def _stop_interfering(iface: str, log: list[str]) -> None:
+    """Deja de interferir SOLO con `iface`, sin matar NetworkManager global.
+
+    Evita `airmon-ng check kill` (que tumba NetworkManager/wpa_supplicant para
+    TODAS las interfaces, incluida la NIC interna). En su lugar pide a
+    NetworkManager que no gestione únicamente ESTA interfaz.
+    """
+    if have("nmcli"):
+        subprocess.run(["nmcli", "device", "set", iface, "managed", "no"],
+                       capture_output=True, text=True)
+        log.append(f"nmcli device set {iface} managed no")
+
+
+def enable_monitor(iface: str) -> tuple[bool, str, str]:
+    """Activa modo monitor SOLO en `iface`. Devuelve (ok, nueva_iface, log)."""
+    log: list[str] = []
+    # phy de la interfaz objetivo ANTES de tocar nada: así el resultado no puede
+    # "latch" a una interfaz monitor que pertenezca a otra antena/NIC.
+    snapshot = list_interfaces()
+    target_phy = _iface_phy(iface, snapshot)
+    before = {i["iface"] for i in snapshot}
+
+    # Parar SOLO lo que interfiere con ESTA interfaz (nunca check kill global).
+    _stop_interfering(iface, log)
+
+    # Ruta moderna basada en iw, acotada a `iface` (down -> monitor -> up).
     subprocess.run(["ip", "link", "set", iface, "down"], capture_output=True)
     subprocess.run(["iw", "dev", iface, "set", "type", "monitor"], capture_output=True)
     subprocess.run(["ip", "link", "set", iface, "up"], capture_output=True)
-    log.append("iw set type monitor")
+    log.append(f"iw dev {iface} set type monitor (phy {target_phy})")
+    time.sleep(1)
+
+    mon = select_monitor_interface(before, list_interfaces(), iface)
+    if mon:
+        return True, mon, "\n".join(log)
+
+    # Fallback: airmon-ng start <iface> (NUNCA 'check kill').
+    if have("airmon-ng"):
+        subprocess.run(["airmon-ng", "start", iface], capture_output=True, text=True)
+        log.append(f"airmon-ng start {iface}")
+        time.sleep(1)
+        mon = select_monitor_interface(before, list_interfaces(), iface)
+        if mon:
+            return True, mon, "\n".join(log)
+
+    # Último recurso: comprobar si la propia iface quedó en monitor.
     if iface_type(iface) == "monitor":
         return True, iface, "\n".join(log)
     return False, iface, "\n".join(log)
 
 
 def restore_managed(iface: str) -> tuple[bool, str, str]:
-    """Devuelve la interfaz a modo managed y reactiva NetworkManager."""
-    log = []
-    subprocess.run(["airmon-ng", "stop", iface], capture_output=True, text=True)
-    log.append(f"airmon-ng stop {iface}")
-    time.sleep(1)
+    """Devuelve a managed SOLO `iface` (o su vdev/phy derivado). No toca otras."""
+    log: list[str] = []
+    # phy objetivo para mapear de vuelta un vdev monitor renombrado por airmon-ng.
+    target_phy = _iface_phy(iface)
+
+    # Si hay un vdev monitor derivado (p. ej. wlan1mon), pararlo SOLO a él.
+    if iface.endswith("mon") or iface_type(iface) == "monitor":
+        if have("airmon-ng"):
+            subprocess.run(["airmon-ng", "stop", iface], capture_output=True, text=True)
+            log.append(f"airmon-ng stop {iface}")
+            time.sleep(1)
+
+    # netdev managed destino: la misma iface si sigue existiendo; si airmon-ng la
+    # renombró/eliminó, el netdev que quede en la MISMA phy (jamás ifs[0] ciego).
     target = iface
     if not _iw_info(target):
-        ifs = [i["iface"] for i in list_interfaces() if i["type"] != "monitor"]
-        target = ifs[0] if ifs else iface
+        sibling = None
+        for i in list_interfaces():
+            if target_phy is not None and i["phy"] == target_phy:
+                sibling = i["iface"]
+                break
+        target = sibling or iface
+
     subprocess.run(["ip", "link", "set", target, "down"], capture_output=True)
     subprocess.run(["iw", "dev", target, "set", "type", "managed"], capture_output=True)
     subprocess.run(["ip", "link", "set", target, "up"], capture_output=True)
-    subprocess.run(["systemctl", "start", "NetworkManager"], capture_output=True)
-    log.append("iw set type managed + systemctl start NetworkManager")
+    log.append(f"iw dev {target} set type managed")
+
+    # Devolver la gestión a NetworkManager SOLO para esta interfaz (no se detuvo
+    # NM globalmente, así que no hace falta reiniciarlo).
+    if have("nmcli"):
+        subprocess.run(["nmcli", "device", "set", target, "managed", "yes"],
+                       capture_output=True, text=True)
+        log.append(f"nmcli device set {target} managed yes")
+
     ok = iface_type(target) != "monitor"
     return ok, target, "\n".join(log)
 
@@ -421,6 +515,36 @@ def parse_airodump_csv(csv_path: str | Path) -> tuple[list[Network], dict[str, l
     return list(nets.values()), clients
 
 
+# ── terminación robusta de procesos ──────────────────────────────────────────
+def _kill_process_group(proc: subprocess.Popen) -> None:
+    """Termina el proceso y su GRUPO: SIGTERM, espera breve y luego SIGKILL.
+
+    airodump/aireplay pueden lanzar hijos; matar solo al padre deja huérfanos
+    que bloquean la interfaz. Si el proceso se arrancó con start_new_session,
+    tiene su propio grupo y os.killpg lo alcanza entero.
+    """
+    def _signal_group(sig: int) -> None:
+        try:
+            os.killpg(os.getpgid(proc.pid), sig)
+        except Exception:
+            try:
+                proc.send_signal(sig)
+            except Exception:
+                pass
+
+    _signal_group(signal.SIGTERM)
+    try:
+        proc.wait(timeout=3)
+        return
+    except Exception:
+        pass
+    _signal_group(signal.SIGKILL)
+    try:
+        proc.wait(timeout=2)
+    except Exception:
+        pass
+
+
 # ── Scanner en vivo ──────────────────────────────────────────────────────────
 class Scanner:
     """Lanza airodump-ng en segundo plano escribiendo CSV; se parsea por timer."""
@@ -444,10 +568,13 @@ class Scanner:
     def start(self) -> None:
         self.tmpdir = tempfile.mkdtemp(prefix="csh_scan_")
         self.prefix = os.path.join(self.tmpdir, "scan")
+        # start_new_session=True -> el proceso queda en su propio grupo/sesión,
+        # de modo que al parar podemos matar al GRUPO (airodump lanza hijos).
         self.proc = subprocess.Popen(
             ["airodump-ng", "--write", self.prefix, "--output-format", "csv",
              "--write-interval", "1", self.interface],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
 
     def start_demo(self) -> None:
@@ -476,12 +603,9 @@ class Scanner:
         return [], {}
 
     def stop(self) -> None:
-        if self.proc and self.proc.poll() is None:
-            self.proc.send_signal(signal.SIGTERM)
-            try:
-                self.proc.wait(timeout=3)
-            except Exception:
-                self.proc.kill()
+        proc = self.proc
+        if proc and proc.poll() is None:
+            _kill_process_group(proc)
         self.proc = None
         if self.tmpdir and os.path.isdir(self.tmpdir):
             shutil.rmtree(self.tmpdir, ignore_errors=True)

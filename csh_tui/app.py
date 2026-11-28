@@ -19,7 +19,12 @@ from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.widgets import (
-    Button, DataTable, Input, Label, RichLog, Static,
+    Button,
+    DataTable,
+    Input,
+    Label,
+    RichLog,
+    Static,
 )
 
 from . import backend as be
@@ -495,7 +500,8 @@ class ScannerScreen(Screen):
         ("v", "vault", "Vault"),
         ("m", "monitor", "Monitor"),
         ("r", "restore", "Restaurar"),
-        ("q", "app.quit", "Salir"),
+        ("q", "quit", "Salir"),
+        ("ctrl+c", "quit", "Salir"),
     ]
 
     ENC_FILTERS = ["TODAS", "WPA2", "WPA", "WPA3", "WEP", "OPN"]
@@ -511,6 +517,10 @@ class ScannerScreen(Screen):
         self.scan_timer = None
         self.selected_bssid: str | None = None
         self._resume_scan = False
+        # Firma del contenido actual de la tabla: evita reconstruirla (y pelear
+        # con el cursor del usuario) cuando nada ha cambiado entre pollings.
+        self._table_sig: tuple | None = None
+        self._polling = False
 
     def compose(self) -> ComposeResult:
         yield Static(id="brandband")
@@ -566,7 +576,7 @@ class ScannerScreen(Screen):
 
     # ── chrome: rail + títulos dinámicos ──
     def _refresh_chrome(self) -> None:
-        app: "CSHApp" = self.app  # type: ignore
+        app: CSHApp = self.app  # type: ignore
         iface = app.interface or "—"
         typ = be.iface_type(iface) if app.interface else "—"
         ch = be.iface_channel(iface) if app.interface else "—"
@@ -629,7 +639,7 @@ class ScannerScreen(Screen):
             self._start_scan()
 
     def _start_scan(self) -> None:
-        app: "CSHApp" = self.app  # type: ignore
+        app: CSHApp = self.app  # type: ignore
         self.scanner = be.Scanner(app.interface or "")
         log = self.query_one("#log", RichLog)
         if be.is_root() and app.interface and be.iface_type(app.interface) == "monitor":
@@ -659,11 +669,63 @@ class ScannerScreen(Screen):
         self.query_one("#log", RichLog).write("[#6f6f85]○[/] Scanner detenido")
         self._refresh_chrome()
 
+    def _teardown_scan(self) -> None:
+        """Desmonte seguro: para timer, mata airodump y cancela workers.
+
+        Se llama al salir (q / ctrl+c) y en on_unmount para que nunca queden
+        procesos huérfanos ni hilos que bloqueen la salida de la plataforma.
+        """
+        self.scanning = False
+        if self.scan_timer:
+            try:
+                self.scan_timer.stop()
+            except Exception:
+                pass
+            self.scan_timer = None
+        if self.scanner:
+            try:
+                self.scanner.stop()
+            except Exception:
+                pass
+        # Cancela workers en marcha (poll, monitor, restore) para no colgar la salida.
+        try:
+            self.workers.cancel_all()
+        except Exception:
+            pass
+
+    def action_quit(self) -> None:
+        # Salida limpia: primero el teardown (timer + subproceso + workers),
+        # luego cerrar la app. Así q y ctrl+c no se quedan colgados.
+        self._teardown_scan()
+        self.app.exit()
+
+    def on_unmount(self) -> None:
+        # Red de seguridad: si la pantalla se desmonta por cualquier vía, no
+        # dejar airodump corriendo ni hilos vivos.
+        self._teardown_scan()
+
     def _poll(self) -> None:
-        if not self.scanner:
+        # Solo despacha el trabajo pesado (parseo del CSV) a un hilo. NUNCA
+        # parsea en el hilo de UI: eso congelaba la plataforma en pleno escaneo.
+        if not self.scanner or not self.scanning:
             return
-        nets, _ = self.scanner.poll()
+        self._poll_worker()
+
+    @work(thread=True, exclusive=True, group="poll")
+    def _poll_worker(self) -> None:
+        # Worker exclusivo del grupo "poll": si un poll previo sigue en marcha,
+        # Textual lo cancela y evita solapamientos (race conditions).
+        scanner = self.scanner
+        if scanner is None:
+            return
+        nets, _ = scanner.poll()
         nets.sort(key=lambda n: n.power, reverse=True)
+        # Actualiza el estado reactivo SIEMPRE en el hilo de UI.
+        self.app.call_from_thread(self._apply_scan, nets)
+
+    def _apply_scan(self, nets: list[be.Network]) -> None:
+        if not self.scanning:
+            return
         self.networks = nets
         self._render_table()
         self._refresh_chrome()
@@ -683,9 +745,22 @@ class ScannerScreen(Screen):
 
     def _render_table(self) -> None:
         t = self.query_one("#nets", DataTable)
+        vis = self._visible()
+        # Firma del contenido: si no cambió (mismas redes y mismos valores
+        # visibles), NO reconstruimos la tabla para no pelear con el cursor /
+        # la selección del usuario ("no deja seleccionar otras redes").
+        sig = tuple(
+            (n.bssid, n.essid, str(n.channel), n.power, n.clients,
+             n.encryption, n.is_enterprise)
+            for n in vis
+        )
+        if sig == self._table_sig:
+            return
+        self._table_sig = sig
+        # Preserva la fila resaltada por BSSID (no por índice) y NO roba el foco:
+        # move_cursor no cambia el widget enfocado (p. ej. el filtro de texto).
         prev = self.selected_bssid
         t.clear()
-        vis = self._visible()
         for n in vis:
             t.add_row(
                 status_glyph(n),
@@ -764,7 +839,7 @@ class ScannerScreen(Screen):
 
     @work(thread=True)
     def action_monitor(self) -> None:
-        app: "CSHApp" = self.app  # type: ignore
+        app: CSHApp = self.app  # type: ignore
         if not be.is_root():
             self.app.call_from_thread(
                 self.query_one("#log", RichLog).write,
@@ -784,7 +859,7 @@ class ScannerScreen(Screen):
 
     @work(thread=True)
     def action_restore(self) -> None:
-        app: "CSHApp" = self.app  # type: ignore
+        app: CSHApp = self.app  # type: ignore
         if not be.is_root() or not app.interface:
             self.app.call_from_thread(
                 self.query_one("#log", RichLog).write,
@@ -947,11 +1022,19 @@ class InterfaceScreen(Screen):
 class CSHApp(App):
     CSS_PATH = "theme.tcss"
     TITLE = APP_TITLE
-    BINDINGS = [("ctrl+q", "quit", "Salir")]
+    BINDINGS = [("ctrl+q", "quit", "Salir"), ("ctrl+c", "quit", "Salir")]
 
     def __init__(self, interface: str | None = None):
         super().__init__()
         self.interface = interface
+
+    def on_unmount(self) -> None:
+        # Garantía final a nivel de app: cancelar cualquier worker vivo para que
+        # la salida nunca se quede colgada esperando hilos.
+        try:
+            self.workers.cancel_all()
+        except Exception:
+            pass
 
     def on_mount(self) -> None:
         # Si se pasó -i, directo al radar; si no, mostrar el selector.
