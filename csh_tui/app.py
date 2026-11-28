@@ -498,14 +498,18 @@ class NetTable(DataTable):
     """
 
     async def _on_click(self, event: events.Click) -> None:
-        # Ignoramos el clic para la selección: solo enfocamos la tabla y
-        # detenemos el evento. Nada de mover cursor ni emitir RowSelected.
+        # prevent_default() corta el handler de DataTable en el MRO (Textual
+        # despacha _on_click a TODA la jerarquía, no solo al override): sin esto
+        # la clase base seguía moviendo el cursor y emitiendo RowSelected.
+        # Solo enfocamos la tabla para que las flechas respondan.
+        event.prevent_default()
         event.stop()
         self.focus()
 
     def _on_mouse_move(self, event: events.MouseMove) -> None:
-        # Sin cursor "hover": el movimiento del ratón/touchpad no debe pintar
-        # ni insinuar selección en la tabla.
+        # Igual que arriba: evitamos el cursor "hover" de la clase base para que
+        # el movimiento del ratón/touchpad no pinte ni insinúe selección.
+        event.prevent_default()
         event.stop()
 
 
@@ -547,6 +551,8 @@ class ScannerScreen(Screen):
         self._row_order: list[str] = []
         self._cols: list = []
         self._polling = False
+        # Evita reentradas al cambiar de modo monitor (pulsaciones repetidas).
+        self._monitor_busy = False
 
     def compose(self) -> ComposeResult:
         yield Static(id="brandband")
@@ -886,22 +892,38 @@ class ScannerScreen(Screen):
     @work(thread=True)
     def action_monitor(self) -> None:
         app: CSHApp = self.app  # type: ignore
+
+        def log(msg: str) -> None:
+            self.app.call_from_thread(self.query_one("#log", RichLog).write, msg)
+
         if not be.is_root():
-            self.app.call_from_thread(
-                self.query_one("#log", RichLog).write,
-                "[#ff6e6e]✗[/] El modo monitor requiere sudo.")
+            log("[#ff6e6e]✗[/] El modo monitor requiere sudo.")
             return
         if not app.interface:
             return
-        self.app.call_from_thread(
-            self.query_one("#log", RichLog).write,
-            f"[#9a8cff]▶[/] Activando modo monitor en {app.interface}…")
-        ok, newif, _ = be.enable_monitor(app.interface)
-        app.interface = newif
-        msg = (f"[#6ee787]✓[/] Monitor activo en {newif}" if ok
-               else f"[#ff6e6e]✗[/] No se pudo activar monitor en {newif}")
-        self.app.call_from_thread(self.query_one("#log", RichLog).write, msg)
-        self.app.call_from_thread(self._refresh_chrome)
+        # Reentrada: si ya se está cambiando el modo (o una pulsación espuria
+        # dispara la acción de nuevo), no lanzamos un segundo cambio en paralelo.
+        if self._monitor_busy:
+            return
+        # Idempotente: si la interfaz ya está en monitor, no la reconfiguramos.
+        # Evita el "parpadeo"/carrera de reactivarlo una y otra vez.
+        if be.iface_type(app.interface) == "monitor":
+            log(f"[#6ee787]✓[/] {app.interface} ya está en modo monitor.")
+            return
+        # No cambiar el modo en pleno escaneo: airodump está usando la radio.
+        if self.scanning:
+            log("[#ffb454]![/] Detén el escaneo (s) antes de cambiar el modo.")
+            return
+        self._monitor_busy = True
+        try:
+            log(f"[#9a8cff]▶[/] Activando modo monitor en {app.interface}…")
+            ok, newif, _ = be.enable_monitor(app.interface)
+            app.interface = newif
+            log(f"[#6ee787]✓[/] Monitor activo en {newif}" if ok
+                else f"[#ff6e6e]✗[/] No se pudo activar monitor en {newif}")
+            self.app.call_from_thread(self._refresh_chrome)
+        finally:
+            self._monitor_busy = False
 
     @work(thread=True)
     def action_restore(self) -> None:
