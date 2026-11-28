@@ -838,7 +838,8 @@ class InterfaceScreen(Screen):
         root = "root" if be.is_root() else "sin root (modo demo)"
         self.query_one("#pickhint", Static).update(Text.from_markup(
             f"[{C_DIM}]Elige la interfaz para la sesión. Se listan todas las WiFi; "
-            f"las externas (USB) van primero y resaltadas.  "
+            f"las externas (USB) van primero y resaltadas. Las marcadas [{C_AMBER}]▲ sin driver[/]"
+            f"[{C_DIM}] necesitan cargar su módulo.  "
             f"Sesión: [/][{C_TEAL}]{root}[/][{C_DIM}].  "
             f"Enter selecciona · r refresca.[/]"
         ))
@@ -860,7 +861,10 @@ class InterfaceScreen(Screen):
         ifs = be.list_interfaces()
         # Externas (USB) primero para que queden preseleccionadas.
         ifs.sort(key=lambda i: (not i.get("external", False), i["iface"]))
-        if not ifs:
+        # Adaptadores USB reconocidos por chipset pero SIN driver cargado
+        # (todavía no aparecen en `iw dev`). Como hace wifite3.
+        driverless = be.list_usb_wifi_adapters()
+        if not ifs and not driverless:
             t.add_row("·", Text("No se detectó ninguna interfaz WiFi", style=C_AMBER), "", "", "", "")
             t.add_row("·", Text("Conecta una antena y pulsa r para refrescar", style=C_DIM), "", "", "", "")
             return
@@ -887,6 +891,21 @@ class InterfaceScreen(Screen):
                 Text(str(i["channel"]), style=C_INK),
                 key=i["iface"],
             )
+        # Adaptadores detectados por hardware pero sin driver: fila informativa.
+        for a in driverless:
+            mod = a.get("module") or "?"
+            name = a["chip"]
+            prod = (a.get("product") or "").strip()
+            label = f"{name} · {prod}" if prod else name
+            t.add_row(
+                Text("▲", style=C_AMBER),
+                Text(label, style=f"b {C_AMBER}"),
+                Text("USB · sin driver", style=C_AMBER),
+                Text(f"modprobe {mod}", style=C_DIM),
+                Text(a.get("usb_id", ""), style="#8a98a0"),
+                Text("—", style=C_DIM),
+                key=f"__nodrv__{a.get('usb_id', name)}",
+            )
 
     def action_refresh(self) -> None:
         self._load()
@@ -905,6 +924,21 @@ class InterfaceScreen(Screen):
 
     def _choose(self, iface: str | None) -> None:
         if not iface:
+            return
+        if iface.startswith("__nodrv__"):
+            usb_id = iface[len("__nodrv__"):]
+            adapters = {a.get("usb_id"): a for a in be.list_usb_wifi_adapters()}
+            a = adapters.get(usb_id)
+            mod = (a or {}).get("module") or ""
+            chip = (a or {}).get("chip") or usb_id
+            cmd = f"sudo modprobe {mod}" if mod else "carga el driver del chip"
+            self.app.notify(
+                f"{chip}: adaptador detectado pero sin driver cargado. "
+                f"Ejecuta «{cmd}» y pulsa r para refrescar.",
+                title="Driver no cargado",
+                severity="warning",
+                timeout=8,
+            )
             return
         self.app.interface = iface  # type: ignore
         self.app.push_screen(ScannerScreen())

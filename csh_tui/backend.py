@@ -154,6 +154,93 @@ def iface_bus(iface: str) -> str:
         return "other"
 
 
+# ── adaptadores WiFi USB sin driver (detección por chipset, estilo wifite3) ────
+# Muchos adaptadores de pentest no exponen interfaz en `iw dev` hasta que su
+# driver está cargado. wifite3 los reconoce por su chip USB (vid:pid); aquí
+# hacemos lo mismo para poder avisar "hardware detectado, falta cargar driver".
+_USB_WIFI_CHIPS: dict[str, str] = {
+    "0e8d:7612": "MT7612U", "0e8d:7610": "MT7610U", "0e8d:7601": "MT7601U",
+    "148f:7601": "MT7601U", "148f:5370": "RT5370", "148f:5372": "RT5372",
+    "148f:3070": "RT3070", "148f:3072": "RT3072",
+    "0bda:8812": "RTL8812AU", "0bda:881a": "RTL8812AU", "0bda:a618": "RTL8812AU",
+    "0bda:8813": "RTL8813AU", "0bda:b812": "RTL8822BU", "0bda:c811": "RTL8811CU",
+    "0bda:8811": "RTL8811AU", "0bda:8178": "RTL8192CU", "0bda:8176": "RTL8188CUS",
+    "0bda:818b": "RTL8192EU", "0bda:f179": "RTL8188FTV", "0bda:8187": "RTL8187",
+    "0cf3:9271": "AR9271", "0cf3:7015": "AR7010",
+    "2357:0109": "RTL8812AU", "2357:0101": "RTL8812AU",
+    "0846:9052": "RTL8812AU", "2001:3319": "RTL8812AU",
+}
+
+# Chip -> módulo del kernel que lo activa (para sugerir el modprobe correcto).
+_CHIP_MODULE: dict[str, str] = {
+    "MT7612U": "mt76x2u", "MT7610U": "mt76x0u", "MT7601U": "mt7601u",
+    "RT5370": "rt2800usb", "RT5372": "rt2800usb", "RT3070": "rt2800usb",
+    "RT3072": "rt2800usb", "RTL8812AU": "8812au", "RTL8813AU": "8812au",
+    "RTL8811AU": "8812au", "RTL8822BU": "88x2bu", "RTL8811CU": "8821cu",
+    "RTL8192CU": "rtl8192cu", "RTL8188CUS": "rtl8192cu", "RTL8192EU": "rtl8xxxu",
+    "RTL8188FTV": "rtl8xxxu", "RTL8187": "rtl8187", "AR9271": "ath9k_htc",
+    "AR7010": "ath9k_htc",
+}
+
+
+def chip_module(chip: str) -> str:
+    """Módulo del kernel que da soporte a un chip, o '' si no se conoce."""
+    return _CHIP_MODULE.get(chip, "")
+
+
+def _read_sysfs(path: str) -> str:
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def _usb_dev_has_netdev(devpath: str) -> tuple[bool, str]:
+    """(driver_cargado, iface) para un dispositivo USB de /sys/bus/usb/devices."""
+    import glob
+    nets = glob.glob(os.path.join(devpath, "*", "net", "*"))
+    if nets:
+        return True, os.path.basename(nets[0])
+    # phy registrada aunque todavía no tenga nombre de netdev
+    if os.path.isdir(os.path.join(devpath, "ieee80211")):
+        return True, ""
+    return False, ""
+
+
+def list_usb_wifi_adapters(include_bound: bool = False) -> list[dict]:
+    """Adaptadores WiFi USB conocidos presentes en el bus.
+
+    Los detecta por chipset (vid:pid) aunque el kernel aún no haya cargado el
+    driver y, por tanto, no exista interfaz en `iw dev` (como hace wifite3).
+    include_bound=False (defecto) devuelve solo los que NO tienen driver
+    cargado, es decir los que faltan por aparecer como interfaz de red.
+    """
+    import glob
+    adapters: list[dict] = []
+    for devpath in glob.glob("/sys/bus/usb/devices/*"):
+        vid = _read_sysfs(os.path.join(devpath, "idVendor")).lower()
+        pid = _read_sysfs(os.path.join(devpath, "idProduct")).lower()
+        if not vid or not pid:
+            continue
+        chip = _USB_WIFI_CHIPS.get(f"{vid}:{pid}")
+        if not chip:
+            continue
+        bound, iface = _usb_dev_has_netdev(devpath)
+        if bound and not include_bound:
+            continue
+        adapters.append({
+            "chip": chip,
+            "usb_id": f"{vid}:{pid}",
+            "product": _read_sysfs(os.path.join(devpath, "product")),
+            "manufacturer": _read_sysfs(os.path.join(devpath, "manufacturer")),
+            "module": chip_module(chip),
+            "driver_loaded": bound,
+            "iface": iface,
+        })
+    return adapters
+
+
 def iface_is_external(iface: str) -> bool:
     """True si la interfaz es una antena externa (adaptador USB)."""
     return iface_bus(iface) == "usb"
@@ -185,11 +272,20 @@ def list_interfaces(external_only: bool = False) -> list[dict]:
     for line in raw.splitlines():
         s = line.strip()
         if line.startswith("phy#"):
-            phy = line.strip()
+            # Nueva phy: cierra la interfaz anterior (aún pertenece a la phy
+            # vigente) antes de cambiar de contexto.
+            _flush(iface, typ, addr, chan, phy)
+            phy = s
+            iface = typ = addr = chan = None
         elif s.startswith("Interface"):
             _flush(iface, typ, addr, chan, phy)
             iface = s.split()[1]
             typ = addr = chan = None
+        elif s.startswith("Unnamed/non-netdev"):
+            # Bloque sin netdev (p. ej. P2P-device): cierra la interfaz previa
+            # y descarta su contexto para que sus 'addr'/'type' no la pisen.
+            _flush(iface, typ, addr, chan, phy)
+            iface = typ = addr = chan = None
         elif s.startswith("addr"):
             addr = s.split()[1]
         elif s.startswith("type"):
