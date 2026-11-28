@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 from rich.text import Text
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
@@ -486,6 +486,30 @@ class VaultScreen(ModalScreen):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  Tabla del radar
+# ─────────────────────────────────────────────────────────────────────────────
+class NetTable(DataTable):
+    """Tabla de redes del radar: navegación SOLO por teclado.
+
+    El ratón / touchpad queda fuera de la selección a propósito. Un clic no
+    mueve la barra ni abre el objetivo; como mucho enfoca la tabla para que las
+    flechas respondan. La fila se elige con ↑/↓ y se abre con Enter. Así un
+    toque accidental del touchpad no puede mover la selección ni romper la TUI.
+    """
+
+    async def _on_click(self, event: events.Click) -> None:
+        # Ignoramos el clic para la selección: solo enfocamos la tabla y
+        # detenemos el evento. Nada de mover cursor ni emitir RowSelected.
+        event.stop()
+        self.focus()
+
+    def _on_mouse_move(self, event: events.MouseMove) -> None:
+        # Sin cursor "hover": el movimiento del ratón/touchpad no debe pintar
+        # ni insinuar selección en la tabla.
+        event.stop()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Pantalla principal: scanner
 # ─────────────────────────────────────────────────────────────────────────────
 class ScannerScreen(Screen):
@@ -517,9 +541,11 @@ class ScannerScreen(Screen):
         self.scan_timer = None
         self.selected_bssid: str | None = None
         self._resume_scan = False
-        # Firma del contenido actual de la tabla: evita reconstruirla (y pelear
-        # con el cursor del usuario) cuando nada ha cambiado entre pollings.
-        self._table_sig: tuple | None = None
+        # Orden estable de filas por BSSID: las redes ya visibles conservan su
+        # posición entre pollings y las nuevas se añaden al final. Así la fila
+        # resaltada no "salta" mientras el usuario navega con las flechas.
+        self._row_order: list[str] = []
+        self._cols: list = []
         self._polling = False
 
     def compose(self) -> ComposeResult:
@@ -535,7 +561,7 @@ class ScannerScreen(Screen):
                     with Horizontal():
                         yield Label("BUSCAR")
                         yield Input(placeholder="nombre de red…", id="ssid")
-                yield DataTable(id="nets", cursor_type="row", zebra_stripes=False)
+                yield NetTable(id="nets", cursor_type="row", zebra_stripes=False)
                 yield RichLog(id="log", markup=True, highlight=False, wrap=True)
         yield Static("", id="cmdbar")
 
@@ -552,7 +578,8 @@ class ScannerScreen(Screen):
         self.query_one("#leyenda", Static).border_title = "LEYENDA"
         self.query_one("#filterbar", Container).border_title = "FILTROS"
         self.query_one("#log", RichLog).border_title = "ACTIVIDAD"
-        self.query_one("#nets", DataTable).add_columns(" ", "RED", "BSSID", "CH", "SEÑAL", "CL", "SEGURIDAD")
+        self._cols = list(self.query_one("#nets", DataTable).add_columns(
+            " ", "RED", "BSSID", "CH", "SEÑAL", "CL", "SEGURIDAD"))
         # Barra de comandos
         self._build_cmdbar()
         self._refresh_chrome()
@@ -743,38 +770,57 @@ class ScannerScreen(Screen):
             out.append(n)
         return out
 
+    def _row_cells(self, n: be.Network) -> list:
+        return [
+            status_glyph(n),
+            ssid_text(n),
+            Text(n.bssid, style="#8a98a0"),
+            Text(str(n.channel), style=C_INK),
+            power_text(n.power),
+            Text(str(n.clients), style=C_CYAN if n.clients else C_DIM),
+            enc_text(n),
+        ]
+
     def _render_table(self) -> None:
         t = self.query_one("#nets", DataTable)
         vis = self._visible()
-        # Firma del contenido: si no cambió (mismas redes y mismos valores
-        # visibles), NO reconstruimos la tabla para no pelear con el cursor /
-        # la selección del usuario ("no deja seleccionar otras redes").
-        sig = tuple(
-            (n.bssid, n.essid, str(n.channel), n.power, n.clients,
-             n.encryption, n.is_enterprise)
-            for n in vis
-        )
-        if sig == self._table_sig:
+        by_bssid = {n.bssid: n for n in vis}
+
+        # Orden estable: conserva el orden actual de las redes que siguen
+        # visibles y añade las nuevas (ordenadas por señal) al final. Evita
+        # reordenar la tabla por señal en cada poll, que hacía "saltar" la fila
+        # bajo el cursor y daba la sensación de que las flechas no respondían.
+        existing = [b for b in self._row_order if b in by_bssid]
+        seen = set(existing)
+        nuevas = [n.bssid for n in sorted(vis, key=lambda n: n.power, reverse=True)
+                  if n.bssid not in seen]
+        order = existing + nuevas
+        self._row_order = order
+
+        current = [row.key.value for row in t.ordered_rows]
+        if current == order and order:
+            # Mismo conjunto y orden de redes: solo refrescamos los valores de
+            # cada celda (señal, clientes, canal…). No tocamos las filas ni el
+            # cursor, así la barra de selección se queda donde el usuario la dejó.
+            for b in order:
+                cells = self._row_cells(by_bssid[b])
+                for col, val in zip(self._cols, cells):
+                    try:
+                        t.update_cell(b, col, val, update_width=False)
+                    except Exception:
+                        pass
             return
-        self._table_sig = sig
-        # Preserva la fila resaltada por BSSID (no por índice) y NO roba el foco:
-        # move_cursor no cambia el widget enfocado (p. ej. el filtro de texto).
+
+        # Cambió el conjunto de redes (apareció/desapareció una, o cambió un
+        # filtro): reconstruimos, pero preservando la fila resaltada por BSSID
+        # (no por índice) y sin robar el foco.
         prev = self.selected_bssid
         t.clear()
-        for n in vis:
-            t.add_row(
-                status_glyph(n),
-                ssid_text(n),
-                Text(n.bssid, style="#8a98a0"),
-                Text(str(n.channel), style=C_INK),
-                power_text(n.power),
-                Text(str(n.clients), style=C_CYAN if n.clients else C_DIM),
-                enc_text(n),
-                key=n.bssid,
-            )
-        if prev:
+        for b in order:
+            t.add_row(*self._row_cells(by_bssid[b]), key=b)
+        if prev and prev in by_bssid:
             try:
-                t.move_cursor(row=t.get_row_index(prev))
+                t.move_cursor(row=t.get_row_index(prev), scroll=False)
             except Exception:
                 pass
 

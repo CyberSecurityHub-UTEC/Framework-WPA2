@@ -177,9 +177,9 @@ async def test_apply_scan_stable_cursor_bug2(tui_env):
         table = screen.query_one("#nets")
         assert table.row_count == 3
 
-        # Firma registrada tras el primer render.
-        sig1 = screen._table_sig
-        assert sig1 is not None
+        # Orden estable registrado tras el primer render.
+        order1 = list(screen._row_order)
+        assert len(order1) == 3
 
         # El usuario mueve el cursor a otra fila.
         table.move_cursor(row=2)
@@ -188,12 +188,72 @@ async def test_apply_scan_stable_cursor_bug2(tui_env):
         bssid_before = screen.selected_bssid
 
         # Un refresh de poll con LOS MISMOS datos no debe reconstruir la tabla
-        # ni mover el cursor.
+        # (no llama a clear) ni mover el cursor / la selección.
+        calls = {"n": 0}
+        orig_clear = table.clear
+        table.clear = lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1),
+                                       orig_clear(*a, **k))[1]
         screen._apply_scan(_fake_networks())
         await pilot.pause()
-        assert screen._table_sig == sig1
+        assert calls["n"] == 0
+        assert screen._row_order == order1
         assert table.cursor_row == moved_to
         assert screen.selected_bssid == bssid_before
+
+
+# ─── Regresión Bug 1: flechas seleccionan, Enter abre, el clic no hace nada ───
+
+async def test_arrows_select_enter_opens_bug1(tui_env):
+    app = CSHApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = await _goto_scanner(pilot)
+        screen.scanning = True
+        screen._apply_scan(_fake_networks())
+        await pilot.pause()
+        table = screen.query_one("#nets")
+        table.focus()
+        await pilot.pause()
+
+        # Las flechas mueven la barra de selección y actualizan selected_bssid.
+        await pilot.press("down")
+        await pilot.pause()
+        assert table.cursor_row == 1
+        bssid_row1 = [r.key.value for r in table.ordered_rows][1]
+        assert screen.selected_bssid == bssid_row1
+
+        opened = {"n": 0}
+        screen.action_open_target = lambda: opened.__setitem__("n", opened["n"] + 1)
+
+        # Enter SÍ abre el objetivo de la fila resaltada.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert opened["n"] == 1
+
+
+async def test_click_does_not_move_cursor_or_open_bug1(tui_env):
+    """Un clic del touchpad no mueve el cursor ni abre el objetivo."""
+    app = CSHApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = await _goto_scanner(pilot)
+        screen.scanning = True
+        screen._apply_scan(_fake_networks())
+        await pilot.pause()
+        table = screen.query_one("#nets")
+        table.focus()
+        table.move_cursor(row=0)
+        await pilot.pause()
+
+        opened = {"n": 0}
+        screen.action_open_target = lambda: opened.__setitem__("n", opened["n"] + 1)
+
+        # Clic sobre la tabla (cae en una fila distinta a la resaltada): el
+        # handler _on_click está neutralizado, así que ni mueve ni abre.
+        await pilot.click("#nets", offset=(10, 4))
+        await pilot.pause()
+        assert table.cursor_row == 0
+        assert opened["n"] == 0
 
 
 async def test_render_table_skips_rebuild_on_same_signature(tui_env):
